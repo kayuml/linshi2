@@ -43,7 +43,7 @@ FIXED_SALT = b"MRNewGameLauncherDataBackupSalt"
 CHANGELOG = [
     ("1.0", "2024.01.01-11:11", [
         ("其他", ["初始版本，使用python重写了原游戏启动器"])
-    ])
+    ]),
 ]
 
 # 赛博朋克配色方案  

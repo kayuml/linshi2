@@ -1,0 +1,792 @@
+
+
+"""MR 新游戏启动器 v39.0 —— webdav 模块（由 MRNewGameLauncher39.0.py 模块化重构而来，逻辑保持不变）。"""
+
+import datetime
+import hashlib
+import io
+import os
+import random
+import re
+import string
+import time
+import zipfile
+
+from webdav3.client import Client
+import pyotp
+
+from .config import VERSION
+from .crypto import decrypt_data, derive_encryption_key, encrypt_data
+from .security import display_qr_code, load_safe_config
+from .storage import get_or_create_data_folder, hide_file, unhide_file
+from .ui import Color, SystemLog
+
+def configure_webdav(folder_path=None):
+    """    
+    配置 WebDAV 服务器信息，并将其保存到配置文件 'MRNewGameLauncherWebDAVConfig.txt' 中。    
+    用户需要输入 WebDAV 服务器地址、用户名和密码，格式为：http(s)://|用户名|密码。    
+    显示当前配置（密码用星号屏蔽），仅在输入新配置时测试连接。    
+    特别注意：避免出现 PermissionError: [Errno 13] Permission denied 错误。    
+    """    
+    if folder_path is None:    
+        folder_path = get_or_create_data_folder()    
+        
+    file_path = os.path.join(folder_path, "MRNewGameLauncherWebDAVConfig.txt")    
+        
+    # 检查并显示现有配置    
+    has_config = False    
+    if os.path.exists(file_path):    
+        try:    
+            # 明确指定 GB18030 编码读取配置    
+            with open(file_path, "r", encoding="GB18030") as file:    
+                lines = file.readlines()    
+                if len(lines) >= 3:    
+                    has_config = True    
+                    current_url = lines[0].strip().replace("WebDAV URL: ", "")    
+                    current_username = lines[1].strip().replace("Username: ", "")    
+                    current_password = lines[2].strip().replace("Password: ", "")    
+                        
+                    # 显示当前配置，密码用星号屏蔽    
+                    print("\n当前 WebDAV 配置:")    
+                    print(f"服务器地址: {current_url}")    
+                    print(f"用户名: {current_username}")    
+                    masked_password = '*' * len(current_password) if current_password else ""    
+                    print(f"密码: {masked_password}")    
+        except Exception as e:    
+            SystemLog.warn(f"读取现有 WebDAV 配置时出错: {e}")  
+        
+    if not has_config:    
+        print("\n当前未配置 WebDAV 服务器")    
+            
+    while True:    
+        # 提示用户输入 WebDAV 服务器信息    
+        webdav_input = input("\n请输入 WebDAV 服务器信息（格式：http(s)://|用户名|密码）：")    
+        if not webdav_input:    
+            return  # 如果直接回车，返回上一级菜单    
+            
+        # 检查输入格式是否正确    
+        if webdav_input.count('|') != 2:    
+            SystemLog.warn("输入格式不正确，请按照格式输入：http(s)://|用户名|密码")  
+            input("按任意键继续...")    
+            continue    
+            
+        # 解析输入内容    
+        webdav_url, username, password = webdav_input.split('|')    
+            
+        # 验证 URL 格式    
+        if not webdav_url.startswith(('http://', 'https://')):    
+            SystemLog.warn("WebDAV 服务器地址必须以 http:// 或 https:// 开头")  
+            input("按任意键继续...")    
+            continue    
+            
+        # 测试新连接    
+        SystemLog.step("正在测试 WebDAV 连接", "run")  
+        if test_webdav_connection(webdav_url, username, password):    
+            SystemLog.step("WebDAV 连接测试", "done")  
+        else:    
+            SystemLog.step("WebDAV 连接测试", "fail")  
+            retry = input(f"\n  {Color.GOLD}连接测试失败！是否仍要保存此配置？(y/n): {Color.RESET}").lower()    
+            if retry != 'y':    
+                continue    
+            
+        # 保存配置到文件    
+        try:    
+            # 确保文件可写    
+            if os.path.exists(file_path):    
+                # 如果文件存在，取消隐藏属性（如果隐藏）    
+                unhide_file(file_path)    
+                
+            # 尝试写入文件，明确指定 GB18030 编码    
+            with open(file_path, "w", encoding="GB18030") as file:    
+                file.write(f"WebDAV URL: {webdav_url}\n")    
+                file.write(f"Username: {username}\n")    
+                file.write(f"Password: {password}\n")    
+                
+            # 写入完成后隐藏文件以保护数据    
+            hide_file(file_path)    
+                
+            SystemLog.info("WebDAV 配置已保存！")  
+            input("按任意键继续...")    
+            break    
+        except PermissionError:    
+            SystemLog.warn("权限不足，无法保存配置文件。请检查文件权限或尝试以管理员身份运行程序。")  
+            input("按任意键继续...")    
+            break    
+        except Exception as e:    
+            SystemLog.warn(f"保存 WebDAV 配置时出错: {e}")  
+            input("按任意键继续...")    
+            break
+
+def test_webdav_connection(url, username, password, max_attempts=3):
+    """测试 WebDAV 连接是否成功，最多尝试3次"""    
+    options = {    
+        'webdav_hostname': url,    
+        'webdav_login': username,    
+        'webdav_password': password,    
+        'webdav_encoding': 'utf-8' # 增加 WebDAV 编码设置，确保文件名和路径正确处理  
+    }    
+        
+    for attempt in range(1, max_attempts + 1):    
+        try:    
+            client = Client(options)    
+            client.list() # 尝试列出目录，验证连接    
+            return True    
+        except Exception as e:    
+            if attempt < max_attempts:    
+                SystemLog.info(f"WebDAV 连接失败 (尝试 {attempt}/{max_attempts}): {e}")  
+                time.sleep(1) # 增加延迟，避免频繁重试  
+            else:    
+                SystemLog.warn(f"WebDAV 连接最终失败: {e}")  
+        
+    return False
+
+def perform_backup(folder_path=None):  
+    """      
+    执行备份操作，将游戏列表、TOTP数据和版本文件打包压缩，并上传到WebDAV服务器。      
+    通过以下措施防止数据泄露和文件篡改：      
+    1. 文件名混淆：使用随机8位字符串重命名敏感文件（如MRNewGameLauncherGameList.txt、MRNewGameLauncherSafeConfig.txt、MRNewGameLauncherConfigVersion.txt）。      
+    2. AES-GCM加密：对所有文件的敏感数据进行加密      
+    3. 哈希校验：记录混淆文件名且加密后的文件和加密后的映射表的SHA256哈希值，并对备份文件进行完整性校验。      
+    4. 映射表：将混淆后的文件名与原始文件名的映射关系记录在manifest.mrmap文件中。      
+    5. 内存操作：全程使用内存中的文件操作，避免在磁盘上生成临时文件。      
+    6. 将所有混淆文件名且加密后的文件、加密后的映射表和加密后的校验文件打包为一个ZIP文件，并上传到WebDAV服务器进行备份。      
+    """      
+    if folder_path is None:      
+        folder_path = get_or_create_data_folder()      
+          
+    # 加载 WebDAV 配置      
+    webdav_config_path = os.path.join(folder_path, "MRNewGameLauncherWebDAVConfig.txt")      
+    if not os.path.exists(webdav_config_path):      
+        SystemLog.warn("未配置 WebDAV 服务器，请先配置 WebDAV 服务器。")    
+        input("按任意键继续...")      
+        return      
+          
+    # 读取 WebDAV 配置      
+    try:      
+        # 明确指定 GB18030 编码读取配置      
+        with open(webdav_config_path, "r", encoding="GB18030") as file:      
+            lines = file.readlines()      
+            webdav_url = lines[0].strip().replace("WebDAV URL: ", "")      
+            username = lines[1].strip().replace("Username: ", "")      
+            password = lines[2].strip().replace("Password: ", "")      
+    except Exception as e:      
+        SystemLog.warn(f"读取 WebDAV 配置时出错: {e}")    
+        input("按任意键继续...")      
+        return      
+          
+    # 初始化 WebDAV 客户端      
+    options = {      
+        'webdav_hostname': webdav_url,      
+        'webdav_login': username,      
+        'webdav_password': password,      
+        'webdav_encoding': 'utf-8' # 增加 WebDAV 编码设置    
+    }      
+    client = Client(options)      
+      
+    # 生成备份文件名（基于当前时间）      
+    timestamp = datetime.datetime.now().strftime('%Y.%m.%d_%H-%M-%S')      
+    backup_filename = f"backup_{timestamp}.zip"      
+          
+    # 生成加密密钥（基于时间戳）      
+    encryption_key = derive_encryption_key(timestamp)      
+              
+    # 定义需要混淆的敏感文件列表      
+    sensitive_files = [      
+        "MRNewGameLauncherConfigVersion.txt",      
+        "MRNewGameLauncherGameList.txt",      
+        "MRNewGameLauncherSafeConfig.txt"      
+    ]      
+          
+    manifest = {}      # 映射关系：混淆文件名 -> 原始文件名      
+    checksum_dict = {} # 存储每个加密后文件的SHA256哈希校验值      
+          
+    # 创建内存中的ZIP压缩包      
+    zip_buffer = io.BytesIO()      
+    try:    
+        SystemLog.step("正在打包敏感配置文件", "run")    
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:      
+            # 对每个敏感文件进行混淆和加密处理      
+            for original_filename in sensitive_files:      
+                file_path = os.path.join(folder_path, original_filename)      
+                if os.path.exists(file_path):      
+                    # 读取文件内容，明确指定 GB18030 编码      
+                    with open(file_path, "r", encoding="GB18030") as f:      
+                        content = f.read()      
+                              
+                    # 生成随机8位字符串作为混淆文件名      
+                    random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=8))      
+                    obfuscated_filename = random_str + ".enc"      
+                    manifest[obfuscated_filename] = original_filename      
+                          
+                    # 使用GB18030编码将内容转换为二进制数据并加密      
+                    content_bytes = content.encode("GB18030")      
+                    encrypted_data = encrypt_data(content_bytes, encryption_key)      
+                          
+                    # 计算每个混淆文件名且加密后的文件的SHA256哈希校验值      
+                    hash_value = hashlib.sha256(encrypted_data).hexdigest()      
+                    checksum_dict[obfuscated_filename] = hash_value      
+                          
+                    # 将混淆文件名且加密后的文件写入压缩包      
+                    zip_file.writestr(obfuscated_filename, encrypted_data)      
+                  
+            # 生成映射表文件 manifest.mrmap（记录混淆文件名与原始文件名的映射关系）      
+            manifest_lines = []      
+            for obf, orig in manifest.items():      
+                manifest_lines.append(f"{obf} → {orig}")      
+            manifest_content = "\n".join(manifest_lines)      
+            manifest_bytes = manifest_content.encode("GB18030")      
+          
+            # 加密映射表      
+            encrypted_manifest = encrypt_data(manifest_bytes, encryption_key)      
+                  
+            # 计算加密后映射表文件的SHA256哈希校验值      
+            manifest_hash = hashlib.sha256(encrypted_manifest).hexdigest()      
+            checksum_dict["manifest.mrmap"] = manifest_hash      
+                  
+            # 将加密后的映射表文件写入压缩包      
+            zip_file.writestr("manifest.mrmap", encrypted_manifest)      
+                  
+            # 生成校验文件 checksum.sha256（格式：文件名:哈希值）      
+            checksum_lines = []      
+            for filename, hash_val in checksum_dict.items():      
+                checksum_lines.append(f"{filename}:{hash_val}")      
+            checksum_content = "\n".join(checksum_lines)      
+            checksum_bytes = checksum_content.encode("GB18030")      
+                  
+            # 加密校验文件      
+            encrypted_checksum = encrypt_data(checksum_bytes, encryption_key)      
+                  
+            # 将加密后的校验文件写入压缩包      
+            zip_file.writestr("checksum.sha256", encrypted_checksum)      
+              
+        SystemLog.step("配置文件打包加密", "done")    
+    
+        # 上传压缩包到 WebDAV 服务器      
+        SystemLog.step("正在上传备份文件到 WebDAV 服务器", "run")    
+        try:      
+            # 确保备份目录存在      
+            backup_dir = "MRNewGameLauncherDataBackup"      
+            
+            # 为上传初期的连接检查增加异常保护
+            if not client.check(backup_dir):      
+                client.mkdir(backup_dir)
+                  
+            zip_buffer.seek(0)  # 将指针重置到文件开头      
+            client.upload_to(buff=zip_buffer, remote_path=f"{backup_dir}/{backup_filename}")      
+            SystemLog.step(f"备份文件上传", "done")    
+            SystemLog.info(f"备份成功：{backup_filename}")    
+        except Exception as e:      
+            SystemLog.step("备份文件上传", "fail")    
+            SystemLog.warn(f"上传备份文件时出错或无法连接服务器: {e}")    
+    finally:      
+        zip_buffer.close()  # 关闭内存文件      
+          
+    input("按任意键继续...")
+
+def decrypt_all_files(zip_file, encryption_key, exclude_files=None):
+    """    
+    解密备份文件中的所有文件（除了排除的文件）    
+        
+    参数:    
+        zip_file: ZipFile对象，表示备份文件    
+        encryption_key: 解密密钥    
+        exclude_files: 要排除的文件列表    
+            
+    返回:    
+        dict: 解密后的文件内容，格式为 {文件名: 解密后的内容}    
+        None: 如果解密失败    
+    """    
+    if exclude_files is None:    
+        exclude_files = []    
+        
+    decrypted_files = {}    
+        
+    try:    
+        for filename in zip_file.namelist():    
+            # 跳过排除的文件    
+            if filename in exclude_files:    
+                continue    
+                
+            # 读取加密文件    
+            encrypted_data = zip_file.read(filename)    
+                
+            # 解密文件    
+            try:    
+                decrypted_data = decrypt_data(encrypted_data, encryption_key)    
+                decrypted_files[filename] = decrypted_data    
+            except Exception as e:    
+                SystemLog.warn(f"解密文件 {filename} 失败：{e}")  
+                return None    
+            
+        return decrypted_files    
+    except Exception as e:    
+        SystemLog.warn(f"解密文件过程中出错：{e}")  
+        return None
+
+def verify_backup_integrity(zip_file, encryption_key):
+    """    
+    验证备份完整性    
+        
+    参数:    
+        zip_file: ZipFile对象，表示备份文件    
+        encryption_key: 解密密钥    
+            
+    返回:    
+        (bool, str): 验证结果和错误信息（如果有）    
+    """    
+    # 定义备份文件中必须包含的文件列表    
+    required_files = ['manifest.mrmap', 'checksum.sha256']    
+        
+    # 检查备份文件中是否包含所有必需的文件    
+    for f in required_files:    
+        if f not in zip_file.namelist():    
+            # 如果缺少必要文件，返回验证失败和错误信息    
+            if f == 'manifest.mrmap':    
+                return False, "缺少必要的映射表文件"    
+            elif f == 'checksum.sha256':    
+                return False, "缺少必要的校验文件"    
+    
+    try:    
+        # 1. 首先解密校验文件    
+        # 读取加密的校验文件 checksum.sha256 的内容    
+        encrypted_checksum = zip_file.read("checksum.sha256")    
+            
+        # 解密校验文件    
+        try:    
+            checksum_bytes = decrypt_data(encrypted_checksum, encryption_key)    
+        except ValueError as e:    
+            # 直接返回解密失败的原始错误信息，避免重复包装    
+            return False, str(e)    
+                
+        checksum_content = checksum_bytes.decode("GB18030")    
+            
+        # 将校验文件内容解析为字典，格式为 {文件名: 哈希值}    
+        checksum_dict = {}    
+        for line in checksum_content.splitlines():    
+            if ":" in line:    
+                filename, hash_val = line.split(":", 1)    
+                checksum_dict[filename] = hash_val    
+            
+        # 2. 验证所有文件的哈希值    
+        # 用于存储验证过程中发现的错误    
+        errors = []    
+            
+        # 遍历备份文件中的所有文件    
+        for filename in zip_file.namelist():    
+            # 跳过校验文件本身    
+            if filename == 'checksum.sha256':    
+                continue    
+                
+            # 读取文件内容    
+            content = zip_file.read(filename)    
+                
+            # 计算文件的 SHA256 哈希值    
+            computed_hash = hashlib.sha256(content).hexdigest()    
+                
+            # 检查文件是否在校验字典中    
+            if filename not in checksum_dict:    
+                # 如果文件未记录在校验字典中，添加错误信息    
+                errors.append(f"检测到未记录的文件‘{filename}’，此文件未包含在校验列表中。")    
+                continue    
+                    
+            # 检查计算出的哈希值是否与校验字典中的哈希值匹配    
+            if checksum_dict[filename] != computed_hash:    
+                # 如果哈希值不匹配，添加错误信息    
+                errors.append(f"文件 {filename} 哈希不匹配")    
+            
+        # 如果发现任何错误，返回验证失败和错误信息    
+        if errors:    
+            return False, "；".join(errors)    
+            
+        # 如果所有文件都通过验证，返回验证成功    
+        return True, ""    
+            
+    except Exception as e:    
+        # 如果在验证过程中发生异常，返回验证失败和异常信息    
+        return False, f"校验过程异常：{str(e)}"
+
+def check_version_compatibility(backup_version):
+    """    
+    版本兼容性检查    
+    """    
+    if backup_version is None:    
+        return False, "备份文件中未找到版本信息，可能为旧版本备份"    
+      
+    try:    
+        # 提取纯数字版本（假设版本格式为x.y）    
+        current_main = float(VERSION)    
+        backup_main = float(backup_version)    
+    except ValueError: # 捕获float转换错误    
+        return False, f"版本格式不兼容（当前：{VERSION}，备份：{backup_version}）"    
+      
+    if current_main != backup_main:    
+        return False, f"主版本不兼容（当前：{VERSION}，备份：{backup_version}）"    
+    return True, ""
+
+def restore_backup(client, folder_path, backup_file, restore_gamelist=False, restore_safe_config=False):  
+    """        
+    从备份文件中恢复游戏列表和/或安全配置。      
+    验证失败时不还原任何文件。        
+    特别注意：避免出现 PermissionError: [Errno 13] Permission denied 错误。        
+    写入完成后重新隐藏文件。        
+    验证成功后输出安全配置中的TOTP 密钥并展示 QR 码。      
+    所有恢复操作完成后提示用户重新打开程序。        
+    包含版本兼容性检查以及备份文件完整性验证与映射表解析        
+    """        
+    try:        
+        # 第一阶段：下载备份文件到内存        
+        SystemLog.step("正在从远程 WebDAV 下载备份包", "run")    
+        zip_buffer = io.BytesIO()        
+        
+        # 增加对远程下载的网络异常处理
+        try:
+            client.download_from(buff=zip_buffer, remote_path=backup_file)        
+        except Exception as e:
+            SystemLog.step("远程下载失败", "fail")
+            SystemLog.warn(f"从 WebDAV 下载备份文件时发生错误: {e}")
+            input("按任意键继续...")
+            return
+
+        zip_buffer.seek(0)        
+        SystemLog.step("远程备份包下载", "done")    
+                
+        with zipfile.ZipFile(zip_buffer, 'r') as zip_file:        
+            # 1. 从文件名中提取时间戳        
+            # 格式: backup_YYYY.MM.DD_HH-MM-SS.zip        
+            SystemLog.step("正在解析备份元数据", "run")    
+            filename = os.path.basename(backup_file)        
+            timestamp_match = re.search(r'backup_(\d{4}\.\d{2}\.\d{2}_\d{2}-\d{2}-\d{2})\.zip', filename)    
+            if not timestamp_match:    
+                SystemLog.step("备份元数据解析", "fail")    
+                SystemLog.warn("备份文件名格式不正确，无法提取时间戳进行解密。")    
+                input("按任意键继续...")    
+                return    
+            timestamp = timestamp_match.group(1)    
+                        
+            # 生成用于解密的加密密钥（基于文件名中的时间戳）        
+            encryption_key = derive_encryption_key(timestamp)        
+            SystemLog.step("备份元数据解析", "done")    
+    
+            # 2. 验证备份完整性：检查必需文件和哈希校验        
+            SystemLog.step("正在验证备份文件完整性", "run")    
+            valid, reason = verify_backup_integrity(zip_file, encryption_key)        
+            if not valid:        
+                SystemLog.step("备份完整性校验", "fail")    
+                SystemLog.warn(f"该备份文件验证失败: {reason}")    
+                choice = input(f"\n  {Color.GOLD}是否删除该备份文件？(y/n): {Color.RESET}").lower()    
+                if choice == 'y':        
+                    try:        
+                        client.clean(backup_file)        
+                        SystemLog.info("该备份文件已成功删除。")    
+                    except Exception as e:        
+                        SystemLog.warn(f"删除该备份文件时出错: {e}")    
+                    input("按任意键继续...")        
+                    return        
+                else:        
+                    SystemLog.info("该备份文件未被删除，你可以重新选择其他的备份文件进行恢复。")    
+                    input("按任意键继续...")        
+                    return        
+            SystemLog.step("备份文件完整性校验", "done")    
+                        
+            # 3. 解密所有文件（除了校验文件，因为它已经在验证过程中被解密）        
+            SystemLog.step("正在解密所有配置文件数据", "run")    
+            decrypted_files = decrypt_all_files(zip_file, encryption_key, exclude_files=["checksum.sha256"])        
+            if decrypted_files is None:        
+                SystemLog.step("配置文件数据解密", "fail")    
+                SystemLog.warn("解密文件失败，无法继续恢复操作。")    
+                input("按任意键继续...")        
+                return        
+            SystemLog.step("配置文件数据解密", "done")    
+                        
+            # 4. 解析映射表，按照映射表还原原始文件名        
+            SystemLog.step("正在解析文件映射关系", "run")    
+            try:        
+                manifest_bytes = decrypted_files["manifest.mrmap"]        
+                manifest_content = manifest_bytes.decode("GB18030")        
+                            
+                # 解析映射表，构建混淆文件名到原始文件名的映射        
+                manifest_dict = {}  # 混淆文件名 -> 原始文件名        
+                for line in manifest_content.splitlines():        
+                    if "→" in line:        
+                        parts = line.split("→")        
+                        obf = parts[0].strip()        
+                        orig = parts[1].strip()        
+                        manifest_dict[obf] = orig        
+            except Exception as e:        
+                SystemLog.step("文件映射关系解析", "fail")    
+                SystemLog.warn(f"解析映射表失败: {e}")    
+                input("按任意键继续...")        
+                return        
+            SystemLog.step("文件映射关系解析", "done")    
+                                    
+            # 5. 读取备份版本并进行版本检查        
+            SystemLog.step("正在检查版本兼容性", "run")    
+            version_file_obf = None        
+            for obf, orig in manifest_dict.items():        
+                if orig == "MRNewGameLauncherConfigVersion.txt":        
+                    version_file_obf = obf        
+                    break        
+                                
+            backup_version = None        
+            if version_file_obf and version_file_obf in decrypted_files:        
+                try:        
+                    version_bytes = decrypted_files[version_file_obf]        
+                    version_content = version_bytes.decode("GB18030")        
+                    backup_version = version_content.split('Ver：')[-1].strip()        
+                except Exception as e:        
+                    SystemLog.step("版本兼容性检查", "fail")    
+                    SystemLog.warn(f"解析版本信息失败: {e}")    
+                    input("按任意键继续...")        
+                    return        
+                      
+            compatible, msg = check_version_compatibility(backup_version)        
+            if not compatible:        
+                SystemLog.step("版本兼容性检查", "fail")    
+                SystemLog.warn(f"您正在尝试恢复不兼容版本的配置，可能会引发未知错误！")    
+                SystemLog.warn(f"版本警告: {msg}")    
+                choice = input(f"\n  {Color.GOLD}是否强制继续恢复？(y/n): {Color.RESET}").lower()    
+                if choice != 'y':        
+                    SystemLog.info("恢复操作已取消。")    
+                    input("按任意键继续...")        
+                    return        
+            SystemLog.step("版本兼容性检查", "done")    
+                            
+            # 6. 验证安全配置（如果需要恢复安全配置）      
+            backup_safe_config_data = None        
+            backup_totp_key = None        
+                            
+            if restore_safe_config:      
+                SystemLog.step("正在验证安全配置完整性", "run")    
+                # 查找安全配置文件      
+                safe_config_file_obf = None        
+                for obf, orig in manifest_dict.items():        
+                    if orig == "MRNewGameLauncherSafeConfig.txt":      
+                        safe_config_file_obf = obf        
+                        break        
+                            
+                if not safe_config_file_obf or safe_config_file_obf not in decrypted_files:        
+                    SystemLog.step("安全配置完整性验证", "fail")    
+                    SystemLog.warn("备份文件中缺少安全配置文件。")    
+                    input("按任意键继续...")        
+                    return        
+                            
+                # 读取解密后的安全配置数据      
+                try:        
+                    safe_config_bytes = decrypted_files[safe_config_file_obf]        
+                    backup_safe_config_data = safe_config_bytes.decode("GB18030")        
+                    backup_totp_key = backup_safe_config_data.split('\n')[0].replace("TOTP密钥：", "").strip()        
+                except Exception as e:        
+                    SystemLog.step("安全配置完整性验证", "fail")    
+                    SystemLog.warn(f"解析安全配置数据失败: {e}")    
+                    input("按任意键继续...")        
+                    return        
+                            
+                # 加载当前的安全配置以获取TOTP密钥      
+                current_totp_key, _, _, _ = load_safe_config(folder_path)      
+                            
+                # 如果备份的 TOTP 密钥与当前密钥不一致，要求用户输入 TOTP 码验证        
+                if backup_totp_key != current_totp_key:        
+                    SystemLog.info("检测到备份文件内的TOTP密钥与当前密钥不一致。") # 改为 info    
+                    code = input(f"\n  {Color.GOLD}请输入当前的 TOTP 码以验证：{Color.RESET}").strip()    
+                    if not code:        
+                        SystemLog.warn("TOTP 验证失败，恢复操作已取消。")    
+                        input("按任意键继续...")        
+                        return        
+                                
+                    totp = pyotp.TOTP(current_totp_key)        
+                    SystemLog.step("正在验证当前 TOTP 码", "run")    
+                    if not totp.verify(code):        
+                        SystemLog.step("当前 TOTP 码验证", "fail")    
+                        SystemLog.warn("TOTP 验证失败，恢复操作已取消。")    
+                        input("按任意键继续...")        
+                        return        
+                    SystemLog.step("当前 TOTP 码验证", "done")    
+                SystemLog.step("安全配置完整性验证", "done")    
+                            
+            # 7. 恢复游戏列表（如果需要）        
+            if restore_gamelist:        
+                SystemLog.step("正在还原游戏列表 (MRNewGameLauncherGameList.txt)", "run")    
+                # 查找游戏列表文件        
+                gamelist_file_obf = None        
+                for obf, orig in manifest_dict.items():        
+                    if orig == "MRNewGameLauncherGameList.txt":        
+                        gamelist_file_obf = obf        
+                        break        
+                                
+                if not gamelist_file_obf or gamelist_file_obf not in decrypted_files:        
+                    SystemLog.step("游戏列表还原", "fail")    
+                    SystemLog.warn("备份文件中缺少游戏列表文件。")    
+                    input("按任意键继续...")        
+                    return        
+                                
+                # 读取解密后的游戏列表        
+                try:        
+                    gamelist_bytes = decrypted_files[gamelist_file_obf]        
+                    game_list_data = gamelist_bytes.decode("GB18030")        
+                except Exception as e:        
+                    SystemLog.step("游戏列表还原", "fail")    
+                    SystemLog.warn(f"解析游戏列表失败: {e}")    
+                    input("按任意键继续...")        
+                    return        
+                                
+                # 确保文件可写        
+                game_list_path = os.path.join(folder_path, "MRNewGameLauncherGameList.txt")        
+                if os.path.exists(game_list_path):        
+                    unhide_file(game_list_path)  # 取消隐藏属性        
+                                
+                # 写入游戏列表文件        
+                try:        
+                    with open(game_list_path, "w", encoding="GB18030") as file: # 明确指定 GB18030 编码写入      
+                        file.write(game_list_data)        
+                finally:        
+                    hide_file(game_list_path)  # 写入完成后重新隐藏文件        
+                SystemLog.step("游戏列表数据还原", "done")    
+                            
+            # 8. 恢复安全配置数据（如果需要）      
+            if restore_safe_config:      
+                SystemLog.step("正在还原安全配置 (MRNewGameLauncherSafeConfig.txt)", "run")    
+                safe_config_path = os.path.join(folder_path, "MRNewGameLauncherSafeConfig.txt")      
+                if os.path.exists(safe_config_path):        
+                    unhide_file(safe_config_path)  # 取消隐藏属性        
+                                
+                # 写入安全配置数据文件      
+                try:        
+                    with open(safe_config_path, "w", encoding="GB18030") as file: # 明确指定 GB18030 编码写入      
+                        file.write(backup_safe_config_data)        
+                                    
+                    # 输出备份文件内的 TOTP 密钥        
+                    SystemLog.info(f"备份文件内的 TOTP 密钥: {backup_totp_key}")    
+                                    
+                    # 通过 QR 码展示密钥        
+                    SystemLog.info("TOTP 密钥的 QR 码:")    
+                    display_qr_code(backup_totp_key)        
+                                    
+                    # 提示用户妥善保管密钥        
+                    SystemLog.info("请妥善保管您的 TOTP 密钥。")    
+                finally:        
+                    hide_file(safe_config_path)  # 写入完成后重新隐藏文件        
+                SystemLog.step("安全配置与 TOTP 密钥还原", "done")    
+                            
+            SystemLog.success("所有数据已成功恢复，程序即将退出。")    
+            input("  按任意键关闭程序...")    
+            os._exit(0)  # 退出程序        
+                
+    except Exception as e:        
+        SystemLog.step("恢复进程", "fail")    
+        SystemLog.warn(f"意外中断: {str(e)}")    
+        input("按任意键继续...")        
+    finally:        
+        zip_buffer.close()
+
+def manage_backups(folder_path=None):  
+    """        
+    管理 WebDAV 服务器上的备份文件，包括列出备份、恢复备份和删除备份。        
+    """        
+    if folder_path is None:        
+        folder_path = get_or_create_data_folder()        
+            
+    # 加载 WebDAV 配置        
+    webdav_config_path = os.path.join(folder_path, "MRNewGameLauncherWebDAVConfig.txt")        
+    if not os.path.exists(webdav_config_path):        
+        SystemLog.warn("未配置 WebDAV 服务器，请先配置 WebDAV 服务器。")    
+        input("按任意键继续...")        
+        return        
+            
+    # 读取 WebDAV 配置        
+    try:        
+        # 明确指定 GB18030 编码读取配置      
+        with open(webdav_config_path, "r", encoding="GB18030") as file:      
+            lines = file.readlines()        
+            webdav_url = lines[0].strip().replace("WebDAV URL: ", "")        
+            username = lines[1].strip().replace("Username: ", "")        
+            password = lines[2].strip().replace("Password: ", "")        
+    except Exception as e:        
+        SystemLog.warn(f"读取 WebDAV 配置时出错: {e}")    
+        input("按任意键继续...")        
+        return        
+            
+    # 初始化 WebDAV 客户端        
+    options = {        
+        'webdav_hostname': webdav_url,        
+        'webdav_login': username,        
+        'webdav_password': password,        
+        'webdav_encoding': 'utf-8' # 增加 WebDAV 编码设置    
+    }        
+    client = Client(options)        
+            
+    # 获取备份文件列表        
+    backup_dir = "MRNewGameLauncherDataBackup"        
+    
+    # 增加异常捕获，防止连接失败导致崩溃
+    try:
+        SystemLog.step("正在检查 WebDAV 远程状态", "run")
+        if not client.check(backup_dir):        
+            SystemLog.step("检查远程状态", "done")
+            SystemLog.info("备份目录不存在，请先创建备份。")
+            input("按任意键继续...")
+            return        
+            
+        backup_files = client.list(backup_dir)        
+        SystemLog.step("远程列表获取", "done")
+    except Exception as e:
+        SystemLog.step("远程访问失败", "fail")
+        SystemLog.warn(f"无法连接到 WebDAV 服务器，请检查网络或地址有效性：{e}")
+        input("按任意键继续...")
+        return
+            
+    backup_files = [f for f in backup_files if f.endswith('.zip')]  # 只保留 .zip 文件        
+    backup_files.sort(reverse=True)  # 按时间倒序排序        
+            
+    if not backup_files:        
+        SystemLog.info("没有可用的备份文件。")    
+        input("按任意键继续...")        
+        return        
+            
+    # 显示备份文件列表        
+    print("备份文件列表：")        
+    for i, backup_file in enumerate(backup_files, start=1):        
+        print(f"{i}. {backup_file}")        
+            
+    # 提示用户选择备份文件        
+    choice = input("请输入要操作的备份文件序号（直接回车返回）：")        
+    if not choice:        
+        return        
+            
+    if not choice.isdigit() or int(choice) < 1 or int(choice) > len(backup_files):        
+        SystemLog.warn("无效的选择，请重新输入。")    
+        input("按任意键继续...")        
+        return        
+            
+    selected_backup = backup_files[int(choice) - 1]        
+    remote_path = f"{backup_dir}/{selected_backup}"        
+            
+    # 提供操作选项        
+    print("1. 恢复游戏列表")        
+    print("2. 恢复安全配置")      
+    print("3. 全部恢复")        
+    print("4. 删除备份")        
+    operation = input("请选择操作（直接回车返回）：")        
+            
+    if not operation:        
+        return  # 返回到上一级菜单        
+            
+    if operation == "1":        
+        restore_backup(client, folder_path, remote_path, restore_gamelist=True, restore_safe_config=False)      
+    elif operation == "2":        
+        restore_backup(client, folder_path, remote_path, restore_gamelist=False, restore_safe_config=True)      
+    elif operation == "3":        
+        restore_backup(client, folder_path, remote_path, restore_gamelist=True, restore_safe_config=True)      
+    elif operation == "4":        
+        try:        
+            SystemLog.step(f"正在删除备份文件: {selected_backup}", "run")    
+            # 使用 clean 方法删除文件        
+            client.clean(remote_path)        
+            SystemLog.step("备份文件删除", "done")    
+            SystemLog.info(f"备份文件 {selected_backup} 已删除。")    
+        except Exception as e:        
+            SystemLog.step("备份文件删除", "fail")    
+            SystemLog.warn(f"删除备份文件时出错: {e}")        
+        input("按任意键继续...")        
+    else:        
+        SystemLog.warn("无效的选择，请重新输入。")    
+        input("按任意键继续...")

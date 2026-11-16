@@ -1,0 +1,8 @@
+pyotp
+qrcode
+pywin32 ; sys_platform == "win32"
+psutil
+webdavclient3
+cryptography
+# Windows Hello 支持（仅 Windows）
+winsdk ; sys_platform == "win32"
