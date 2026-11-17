@@ -1,6 +1,6 @@
 
 
-"""MR 新游戏启动器 v39.0 —— about 模块（由 MRNewGameLauncher39.0.py 模块化重构而来，逻辑保持不变）。"""
+"""MR 新游戏启动器 v39.0 —— about 模块。"""
 
 import os
 
