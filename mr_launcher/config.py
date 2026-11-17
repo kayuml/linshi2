@@ -49,6 +49,9 @@ DATA_FILE_ENCODING = "GB18030"
 # 日志文件编码
 LOG_FILE_ENCODING = "utf-8"
 
+# 版本文件统一编码（使用UTF-8以确保所有文本编辑器自动识别不乱码）
+VERSION_FILE_ENCODING = "utf-8"
+
 # Windows 文件属性：隐藏
 FILE_ATTRIBUTE_HIDDEN = 0x02
 
