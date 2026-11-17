@@ -9,13 +9,21 @@ import shutil
 import win32api
 import win32file
 
-from .config import VERSION
+from .config import (
+    DATA_FILE_ENCODING,
+    DATA_FOLDER_NAME,
+    FILE_ATTRIBUTE_HIDDEN,
+    FILE_ATTRIBUTE_NORMAL,
+    GAME_LIST_FILE_NAME,
+    VERSION,
+    VERSION_FILE_NAME,
+)
 
 def create_or_update_version_file(folder_path):
     """    
     创建/更新版本文件    
     """    
-    version_file = os.path.join(folder_path, "MRNewGameLauncherConfigVersion.txt")    
+    version_file = os.path.join(folder_path, VERSION_FILE_NAME)    
     try:    
         # 尝试取消隐藏属性（如果存在）    
         if os.path.exists(version_file):    
@@ -81,7 +89,7 @@ def create_data_folder(drive):
     """    
     在指定盘符的根目录下创建名为 MRNewGameLauncherData 的文件夹。    
     """    
-    folder_path = os.path.join(drive, "MRNewGameLauncherData")    
+    folder_path = os.path.join(drive, DATA_FOLDER_NAME)    
     if not os.path.exists(folder_path):    
         os.makedirs(folder_path)    
     return folder_path
@@ -95,14 +103,14 @@ def get_or_create_data_folder():
     drives = get_available_drives()    
     existing_folders = []    
     for drive in drives:    
-        folder_path = os.path.join(drive, "MRNewGameLauncherData")    
+        folder_path = os.path.join(drive, DATA_FOLDER_NAME)    
         if os.path.exists(folder_path):    
             existing_folders.append(folder_path)    
         
     if len(existing_folders) == 1:    
         return existing_folders[0]    
     elif len(existing_folders) > 1:    
-        print("发现多个 MRNewGameLauncherData 文件夹，请选择一个:")    
+        print(f"发现多个 {DATA_FOLDER_NAME} 文件夹，请选择一个:")    
         print("警告：选择之外的其他文件夹将被删除。")    
         for i, folder in enumerate(existing_folders, start=1):    
             print(f"{i}. {folder}")    
@@ -140,11 +148,11 @@ def load_game_list(folder_path=None):
     if folder_path is None:    
         folder_path = get_or_create_data_folder()    
         
-    file_path = os.path.join(folder_path, "MRNewGameLauncherGameList.txt")    
+    file_path = os.path.join(folder_path, GAME_LIST_FILE_NAME)    
         
     if os.path.exists(file_path):  # 检查游戏列表文件是否存在    
         # 使用 GB18030 编码读取文件，以支持特殊字符并与备份功能保持一致  
-        with open(file_path, "r", encoding="GB18030") as file:  
+        with open(file_path, "r", encoding=DATA_FILE_ENCODING) as file:  
             # 逐行读取文件，并根据'|'分隔符拆分每行内容    
             game_list = [line.strip().split('|') for line in file]    
             
@@ -189,12 +197,12 @@ def save_game_list(game_list, folder_path=None):
     if folder_path is None:    
         folder_path = get_or_create_data_folder()    
         
-    file_path = os.path.join(folder_path, "MRNewGameLauncherGameList.txt")    
+    file_path = os.path.join(folder_path, GAME_LIST_FILE_NAME)    
         
     if os.path.exists(file_path):    
         unhide_file(file_path)  # 确保文件是可见的    
     # 使用 GB18030 编码写入文件，以支持特殊字符并与备份功能保持一致  
-    with open(file_path, "w", encoding="GB18030") as file:  
+    with open(file_path, "w", encoding=DATA_FILE_ENCODING) as file:  
         # 将每个游戏的信息以'|'连接并写入文件    
         for game in game_list:    
             file.write('|'.join(game) + "\n")    
@@ -205,10 +213,8 @@ def hide_file(filepath):
     将指定文件设置为隐藏属性（Windows系统）。    
     """    
     if os.name == 'nt':  # 检查是否为Windows操作系统    
-        FILE_ATTRIBUTE_HIDDEN = 0x02  # 隐藏属性    
         ctypes.windll.kernel32.SetFileAttributesW(filepath, FILE_ATTRIBUTE_HIDDEN)
 
 def unhide_file(filepath):
     if os.name == 'nt':  # 检查是否为Windows操作系统    
-        FILE_ATTRIBUTE_NORMAL = 0x80  # 正常属性    
         ctypes.windll.kernel32.SetFileAttributesW(filepath, FILE_ATTRIBUTE_NORMAL)

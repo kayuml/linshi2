@@ -15,7 +15,27 @@ import zipfile
 from webdav3.client import Client
 import pyotp
 
-from .config import VERSION
+from .config import (
+    BACKUP_DIR_NAME,
+    BACKUP_FILE_PREFIX,
+    BACKUP_FILE_SUFFIX,
+    BACKUP_FILENAME_PATTERN,
+    BACKUP_TIMESTAMP_FORMAT,
+    CHECKSUM_FILE_NAME,
+    DATA_FILE_ENCODING,
+    ENCRYPTED_FILE_SUFFIX,
+    GAME_LIST_FILE_NAME,
+    MANIFEST_FILE_NAME,
+    OBFUSCATED_NAME_LENGTH,
+    SAFE_CONFIG_FILE_NAME,
+    SENSITIVE_FILES,
+    VERSION,
+    VERSION_FILE_NAME,
+    WEBDAV_CONFIG_FILE_NAME,
+    WEBDAV_ENCODING,
+    WEBDAV_MAX_ATTEMPTS,
+    WEBDAV_RETRY_DELAY,
+)
 from .crypto import decrypt_data, derive_encryption_key, encrypt_data
 from .security import display_qr_code, load_safe_config
 from .storage import get_or_create_data_folder, hide_file, unhide_file
@@ -31,14 +51,14 @@ def configure_webdav(folder_path=None):
     if folder_path is None:    
         folder_path = get_or_create_data_folder()    
         
-    file_path = os.path.join(folder_path, "MRNewGameLauncherWebDAVConfig.txt")    
+    file_path = os.path.join(folder_path, WEBDAV_CONFIG_FILE_NAME)    
         
     # 检查并显示现有配置    
     has_config = False    
     if os.path.exists(file_path):    
         try:    
             # 明确指定 GB18030 编码读取配置    
-            with open(file_path, "r", encoding="GB18030") as file:    
+            with open(file_path, "r", encoding=DATA_FILE_ENCODING) as file:    
                 lines = file.readlines()    
                 if len(lines) >= 3:    
                     has_config = True    
@@ -97,7 +117,7 @@ def configure_webdav(folder_path=None):
                 unhide_file(file_path)    
                 
             # 尝试写入文件，明确指定 GB18030 编码    
-            with open(file_path, "w", encoding="GB18030") as file:    
+            with open(file_path, "w", encoding=DATA_FILE_ENCODING) as file:    
                 file.write(f"WebDAV URL: {webdav_url}\n")    
                 file.write(f"Username: {username}\n")    
                 file.write(f"Password: {password}\n")    
@@ -117,13 +137,13 @@ def configure_webdav(folder_path=None):
             input("按任意键继续...")    
             break
 
-def test_webdav_connection(url, username, password, max_attempts=3):
+def test_webdav_connection(url, username, password, max_attempts=WEBDAV_MAX_ATTEMPTS):
     """测试 WebDAV 连接是否成功，最多尝试3次"""    
     options = {    
         'webdav_hostname': url,    
         'webdav_login': username,    
         'webdav_password': password,    
-        'webdav_encoding': 'utf-8' # 增加 WebDAV 编码设置，确保文件名和路径正确处理  
+        'webdav_encoding': WEBDAV_ENCODING # 增加 WebDAV 编码设置，确保文件名和路径正确处理  
     }    
         
     for attempt in range(1, max_attempts + 1):    
@@ -134,7 +154,7 @@ def test_webdav_connection(url, username, password, max_attempts=3):
         except Exception as e:    
             if attempt < max_attempts:    
                 SystemLog.info(f"WebDAV 连接失败 (尝试 {attempt}/{max_attempts}): {e}")  
-                time.sleep(1) # 增加延迟，避免频繁重试  
+                time.sleep(WEBDAV_RETRY_DELAY) # 增加延迟，避免频繁重试  
             else:    
                 SystemLog.warn(f"WebDAV 连接最终失败: {e}")  
         
@@ -155,7 +175,7 @@ def perform_backup(folder_path=None):
         folder_path = get_or_create_data_folder()      
           
     # 加载 WebDAV 配置      
-    webdav_config_path = os.path.join(folder_path, "MRNewGameLauncherWebDAVConfig.txt")      
+    webdav_config_path = os.path.join(folder_path, WEBDAV_CONFIG_FILE_NAME)      
     if not os.path.exists(webdav_config_path):      
         SystemLog.warn("未配置 WebDAV 服务器，请先配置 WebDAV 服务器。")    
         input("按任意键继续...")      
@@ -164,7 +184,7 @@ def perform_backup(folder_path=None):
     # 读取 WebDAV 配置      
     try:      
         # 明确指定 GB18030 编码读取配置      
-        with open(webdav_config_path, "r", encoding="GB18030") as file:      
+        with open(webdav_config_path, "r", encoding=DATA_FILE_ENCODING) as file:      
             lines = file.readlines()      
             webdav_url = lines[0].strip().replace("WebDAV URL: ", "")      
             username = lines[1].strip().replace("Username: ", "")      
@@ -179,23 +199,19 @@ def perform_backup(folder_path=None):
         'webdav_hostname': webdav_url,      
         'webdav_login': username,      
         'webdav_password': password,      
-        'webdav_encoding': 'utf-8' # 增加 WebDAV 编码设置    
+        'webdav_encoding': WEBDAV_ENCODING # 增加 WebDAV 编码设置    
     }      
     client = Client(options)      
       
     # 生成备份文件名（基于当前时间）      
-    timestamp = datetime.datetime.now().strftime('%Y.%m.%d_%H-%M-%S')      
-    backup_filename = f"backup_{timestamp}.zip"      
+    timestamp = datetime.datetime.now().strftime(BACKUP_TIMESTAMP_FORMAT)      
+    backup_filename = f"{BACKUP_FILE_PREFIX}{timestamp}{BACKUP_FILE_SUFFIX}"      
           
     # 生成加密密钥（基于时间戳）      
     encryption_key = derive_encryption_key(timestamp)      
               
     # 定义需要混淆的敏感文件列表      
-    sensitive_files = [      
-        "MRNewGameLauncherConfigVersion.txt",      
-        "MRNewGameLauncherGameList.txt",      
-        "MRNewGameLauncherSafeConfig.txt"      
-    ]      
+    sensitive_files = SENSITIVE_FILES
           
     manifest = {}      # 映射关系：混淆文件名 -> 原始文件名      
     checksum_dict = {} # 存储每个加密后文件的SHA256哈希校验值      
@@ -210,16 +226,16 @@ def perform_backup(folder_path=None):
                 file_path = os.path.join(folder_path, original_filename)      
                 if os.path.exists(file_path):      
                     # 读取文件内容，明确指定 GB18030 编码      
-                    with open(file_path, "r", encoding="GB18030") as f:      
+                    with open(file_path, "r", encoding=DATA_FILE_ENCODING) as f:      
                         content = f.read()      
                               
                     # 生成随机8位字符串作为混淆文件名      
-                    random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=8))      
-                    obfuscated_filename = random_str + ".enc"      
+                    random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=OBFUSCATED_NAME_LENGTH))      
+                    obfuscated_filename = random_str + ENCRYPTED_FILE_SUFFIX      
                     manifest[obfuscated_filename] = original_filename      
                           
                     # 使用GB18030编码将内容转换为二进制数据并加密      
-                    content_bytes = content.encode("GB18030")      
+                    content_bytes = content.encode(DATA_FILE_ENCODING)      
                     encrypted_data = encrypt_data(content_bytes, encryption_key)      
                           
                     # 计算每个混淆文件名且加密后的文件的SHA256哈希校验值      
@@ -234,30 +250,30 @@ def perform_backup(folder_path=None):
             for obf, orig in manifest.items():      
                 manifest_lines.append(f"{obf} → {orig}")      
             manifest_content = "\n".join(manifest_lines)      
-            manifest_bytes = manifest_content.encode("GB18030")      
+            manifest_bytes = manifest_content.encode(DATA_FILE_ENCODING)      
           
             # 加密映射表      
             encrypted_manifest = encrypt_data(manifest_bytes, encryption_key)      
                   
             # 计算加密后映射表文件的SHA256哈希校验值      
             manifest_hash = hashlib.sha256(encrypted_manifest).hexdigest()      
-            checksum_dict["manifest.mrmap"] = manifest_hash      
+            checksum_dict[MANIFEST_FILE_NAME] = manifest_hash      
                   
             # 将加密后的映射表文件写入压缩包      
-            zip_file.writestr("manifest.mrmap", encrypted_manifest)      
+            zip_file.writestr(MANIFEST_FILE_NAME, encrypted_manifest)      
                   
             # 生成校验文件 checksum.sha256（格式：文件名:哈希值）      
             checksum_lines = []      
             for filename, hash_val in checksum_dict.items():      
                 checksum_lines.append(f"{filename}:{hash_val}")      
             checksum_content = "\n".join(checksum_lines)      
-            checksum_bytes = checksum_content.encode("GB18030")      
+            checksum_bytes = checksum_content.encode(DATA_FILE_ENCODING)      
                   
             # 加密校验文件      
             encrypted_checksum = encrypt_data(checksum_bytes, encryption_key)      
                   
             # 将加密后的校验文件写入压缩包      
-            zip_file.writestr("checksum.sha256", encrypted_checksum)      
+            zip_file.writestr(CHECKSUM_FILE_NAME, encrypted_checksum)      
               
         SystemLog.step("配置文件打包加密", "done")    
     
@@ -265,7 +281,7 @@ def perform_backup(folder_path=None):
         SystemLog.step("正在上传备份文件到 WebDAV 服务器", "run")    
         try:      
             # 确保备份目录存在      
-            backup_dir = "MRNewGameLauncherDataBackup"      
+            backup_dir = BACKUP_DIR_NAME      
             
             # 为上传初期的连接检查增加异常保护
             if not client.check(backup_dir):      
@@ -335,21 +351,21 @@ def verify_backup_integrity(zip_file, encryption_key):
         (bool, str): 验证结果和错误信息（如果有）    
     """    
     # 定义备份文件中必须包含的文件列表    
-    required_files = ['manifest.mrmap', 'checksum.sha256']    
+    required_files = [MANIFEST_FILE_NAME, CHECKSUM_FILE_NAME]    
         
     # 检查备份文件中是否包含所有必需的文件    
     for f in required_files:    
         if f not in zip_file.namelist():    
             # 如果缺少必要文件，返回验证失败和错误信息    
-            if f == 'manifest.mrmap':    
+            if f == MANIFEST_FILE_NAME:    
                 return False, "缺少必要的映射表文件"    
-            elif f == 'checksum.sha256':    
+            elif f == CHECKSUM_FILE_NAME:    
                 return False, "缺少必要的校验文件"    
     
     try:    
         # 1. 首先解密校验文件    
         # 读取加密的校验文件 checksum.sha256 的内容    
-        encrypted_checksum = zip_file.read("checksum.sha256")    
+        encrypted_checksum = zip_file.read(CHECKSUM_FILE_NAME)    
             
         # 解密校验文件    
         try:    
@@ -358,7 +374,7 @@ def verify_backup_integrity(zip_file, encryption_key):
             # 直接返回解密失败的原始错误信息，避免重复包装    
             return False, str(e)    
                 
-        checksum_content = checksum_bytes.decode("GB18030")    
+        checksum_content = checksum_bytes.decode(DATA_FILE_ENCODING)    
             
         # 将校验文件内容解析为字典，格式为 {文件名: 哈希值}    
         checksum_dict = {}    
@@ -374,7 +390,7 @@ def verify_backup_integrity(zip_file, encryption_key):
         # 遍历备份文件中的所有文件    
         for filename in zip_file.namelist():    
             # 跳过校验文件本身    
-            if filename == 'checksum.sha256':    
+            if filename == CHECKSUM_FILE_NAME:    
                 continue    
                 
             # 读取文件内容    
@@ -455,7 +471,7 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
             # 格式: backup_YYYY.MM.DD_HH-MM-SS.zip        
             SystemLog.step("正在解析备份元数据", "run")    
             filename = os.path.basename(backup_file)        
-            timestamp_match = re.search(r'backup_(\d{4}\.\d{2}\.\d{2}_\d{2}-\d{2}-\d{2})\.zip', filename)    
+            timestamp_match = re.search(BACKUP_FILENAME_PATTERN, filename)    
             if not timestamp_match:    
                 SystemLog.step("备份元数据解析", "fail")    
                 SystemLog.warn("备份文件名格式不正确，无法提取时间戳进行解密。")    
@@ -490,7 +506,7 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                         
             # 3. 解密所有文件（除了校验文件，因为它已经在验证过程中被解密）        
             SystemLog.step("正在解密所有配置文件数据", "run")    
-            decrypted_files = decrypt_all_files(zip_file, encryption_key, exclude_files=["checksum.sha256"])        
+            decrypted_files = decrypt_all_files(zip_file, encryption_key, exclude_files=[CHECKSUM_FILE_NAME])        
             if decrypted_files is None:        
                 SystemLog.step("配置文件数据解密", "fail")    
                 SystemLog.warn("解密文件失败，无法继续恢复操作。")    
@@ -501,8 +517,8 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
             # 4. 解析映射表，按照映射表还原原始文件名        
             SystemLog.step("正在解析文件映射关系", "run")    
             try:        
-                manifest_bytes = decrypted_files["manifest.mrmap"]        
-                manifest_content = manifest_bytes.decode("GB18030")        
+                manifest_bytes = decrypted_files[MANIFEST_FILE_NAME]        
+                manifest_content = manifest_bytes.decode(DATA_FILE_ENCODING)        
                             
                 # 解析映射表，构建混淆文件名到原始文件名的映射        
                 manifest_dict = {}  # 混淆文件名 -> 原始文件名        
@@ -523,7 +539,7 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
             SystemLog.step("正在检查版本兼容性", "run")    
             version_file_obf = None        
             for obf, orig in manifest_dict.items():        
-                if orig == "MRNewGameLauncherConfigVersion.txt":        
+                if orig == VERSION_FILE_NAME:        
                     version_file_obf = obf        
                     break        
                                 
@@ -531,7 +547,7 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
             if version_file_obf and version_file_obf in decrypted_files:        
                 try:        
                     version_bytes = decrypted_files[version_file_obf]        
-                    version_content = version_bytes.decode("GB18030")        
+                    version_content = version_bytes.decode(DATA_FILE_ENCODING)        
                     backup_version = version_content.split('Ver：')[-1].strip()        
                 except Exception as e:        
                     SystemLog.step("版本兼容性检查", "fail")    
@@ -560,7 +576,7 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                 # 查找安全配置文件      
                 safe_config_file_obf = None        
                 for obf, orig in manifest_dict.items():        
-                    if orig == "MRNewGameLauncherSafeConfig.txt":      
+                    if orig == SAFE_CONFIG_FILE_NAME:      
                         safe_config_file_obf = obf        
                         break        
                             
@@ -573,7 +589,7 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                 # 读取解密后的安全配置数据      
                 try:        
                     safe_config_bytes = decrypted_files[safe_config_file_obf]        
-                    backup_safe_config_data = safe_config_bytes.decode("GB18030")        
+                    backup_safe_config_data = safe_config_bytes.decode(DATA_FILE_ENCODING)        
                     backup_totp_key = backup_safe_config_data.split('\n')[0].replace("TOTP密钥：", "").strip()        
                 except Exception as e:        
                     SystemLog.step("安全配置完整性验证", "fail")    
@@ -605,11 +621,11 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                             
             # 7. 恢复游戏列表（如果需要）        
             if restore_gamelist:        
-                SystemLog.step("正在还原游戏列表 (MRNewGameLauncherGameList.txt)", "run")    
+                SystemLog.step(f"正在还原游戏列表 ({GAME_LIST_FILE_NAME})", "run")    
                 # 查找游戏列表文件        
                 gamelist_file_obf = None        
                 for obf, orig in manifest_dict.items():        
-                    if orig == "MRNewGameLauncherGameList.txt":        
+                    if orig == GAME_LIST_FILE_NAME:        
                         gamelist_file_obf = obf        
                         break        
                                 
@@ -622,7 +638,7 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                 # 读取解密后的游戏列表        
                 try:        
                     gamelist_bytes = decrypted_files[gamelist_file_obf]        
-                    game_list_data = gamelist_bytes.decode("GB18030")        
+                    game_list_data = gamelist_bytes.decode(DATA_FILE_ENCODING)        
                 except Exception as e:        
                     SystemLog.step("游戏列表还原", "fail")    
                     SystemLog.warn(f"解析游戏列表失败: {e}")    
@@ -630,13 +646,13 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                     return        
                                 
                 # 确保文件可写        
-                game_list_path = os.path.join(folder_path, "MRNewGameLauncherGameList.txt")        
+                game_list_path = os.path.join(folder_path, GAME_LIST_FILE_NAME)        
                 if os.path.exists(game_list_path):        
                     unhide_file(game_list_path)  # 取消隐藏属性        
                                 
                 # 写入游戏列表文件        
                 try:        
-                    with open(game_list_path, "w", encoding="GB18030") as file: # 明确指定 GB18030 编码写入      
+                    with open(game_list_path, "w", encoding=DATA_FILE_ENCODING) as file: # 明确指定 GB18030 编码写入      
                         file.write(game_list_data)        
                 finally:        
                     hide_file(game_list_path)  # 写入完成后重新隐藏文件        
@@ -644,14 +660,14 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                             
             # 8. 恢复安全配置数据（如果需要）      
             if restore_safe_config:      
-                SystemLog.step("正在还原安全配置 (MRNewGameLauncherSafeConfig.txt)", "run")    
-                safe_config_path = os.path.join(folder_path, "MRNewGameLauncherSafeConfig.txt")      
+                SystemLog.step(f"正在还原安全配置 ({SAFE_CONFIG_FILE_NAME})", "run")    
+                safe_config_path = os.path.join(folder_path, SAFE_CONFIG_FILE_NAME)      
                 if os.path.exists(safe_config_path):        
                     unhide_file(safe_config_path)  # 取消隐藏属性        
                                 
                 # 写入安全配置数据文件      
                 try:        
-                    with open(safe_config_path, "w", encoding="GB18030") as file: # 明确指定 GB18030 编码写入      
+                    with open(safe_config_path, "w", encoding=DATA_FILE_ENCODING) as file: # 明确指定 GB18030 编码写入      
                         file.write(backup_safe_config_data)        
                                     
                     # 输出备份文件内的 TOTP 密钥        
@@ -686,7 +702,7 @@ def manage_backups(folder_path=None):
         folder_path = get_or_create_data_folder()        
             
     # 加载 WebDAV 配置        
-    webdav_config_path = os.path.join(folder_path, "MRNewGameLauncherWebDAVConfig.txt")        
+    webdav_config_path = os.path.join(folder_path, WEBDAV_CONFIG_FILE_NAME)        
     if not os.path.exists(webdav_config_path):        
         SystemLog.warn("未配置 WebDAV 服务器，请先配置 WebDAV 服务器。")    
         input("按任意键继续...")        
@@ -695,7 +711,7 @@ def manage_backups(folder_path=None):
     # 读取 WebDAV 配置        
     try:        
         # 明确指定 GB18030 编码读取配置      
-        with open(webdav_config_path, "r", encoding="GB18030") as file:      
+        with open(webdav_config_path, "r", encoding=DATA_FILE_ENCODING) as file:      
             lines = file.readlines()        
             webdav_url = lines[0].strip().replace("WebDAV URL: ", "")        
             username = lines[1].strip().replace("Username: ", "")        
@@ -710,12 +726,12 @@ def manage_backups(folder_path=None):
         'webdav_hostname': webdav_url,        
         'webdav_login': username,        
         'webdav_password': password,        
-        'webdav_encoding': 'utf-8' # 增加 WebDAV 编码设置    
+        'webdav_encoding': WEBDAV_ENCODING # 增加 WebDAV 编码设置    
     }        
     client = Client(options)        
             
     # 获取备份文件列表        
-    backup_dir = "MRNewGameLauncherDataBackup"        
+    backup_dir = BACKUP_DIR_NAME        
     
     # 增加异常捕获，防止连接失败导致崩溃
     try:
@@ -734,7 +750,7 @@ def manage_backups(folder_path=None):
         input("按任意键继续...")
         return
             
-    backup_files = [f for f in backup_files if f.endswith('.zip')]  # 只保留 .zip 文件        
+    backup_files = [f for f in backup_files if f.endswith(BACKUP_FILE_SUFFIX)]  # 只保留 .zip 文件        
     backup_files.sort(reverse=True)  # 按时间倒序排序        
             
     if not backup_files:        

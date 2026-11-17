@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 
-from .config import FIXED_SALT
+from .config import AES_GCM_NONCE_LENGTH, AES_KEY_LENGTH, FIXED_SALT, PBKDF2_ITERATIONS
 
 def derive_encryption_key(timestamp):
     """    
@@ -27,9 +27,9 @@ def derive_encryption_key(timestamp):
     # 使用PBKDF2HMAC派生密钥    
     kdf = PBKDF2HMAC(    
         algorithm=hashes.SHA256(),    
-        length=32,  # 256位密钥    
+        length=AES_KEY_LENGTH,  # 256位密钥    
         salt=FIXED_SALT,    
-        iterations=100000,  # 迭代次数    
+        iterations=PBKDF2_ITERATIONS,  # 迭代次数    
     )    
         
     # 派生并返回密钥    
@@ -50,7 +50,7 @@ def encrypt_data(data, key):
     aesgcm = AESGCM(key)    
         
     # 生成随机12字节nonce    
-    nonce = os.urandom(12)    
+    nonce = os.urandom(AES_GCM_NONCE_LENGTH)    
         
     # 加密数据（AES-GCM会自动添加认证标签）    
     ciphertext = aesgcm.encrypt(nonce, data, None)    
@@ -73,10 +73,10 @@ def decrypt_data(encrypted_data, key):
     aesgcm = AESGCM(key)    
         
     # 提取nonce（前12字节）    
-    nonce = encrypted_data[:12]    
+    nonce = encrypted_data[:AES_GCM_NONCE_LENGTH]    
         
     # 提取密文（剩余部分）    
-    ciphertext = encrypted_data[12:]    
+    ciphertext = encrypted_data[AES_GCM_NONCE_LENGTH:]    
         
     # 解密数据    
     try:    

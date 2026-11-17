@@ -8,7 +8,7 @@
 MRNewGameLauncher39_0_main.py   # 程序入口（等价于原脚本直接运行）
 mr_launcher/
 ├── __init__.py        # 包说明
-├── config.py          # VERSION / AUTHOR / BLOG / FIXED_SALT / CHANGELOG
+├── config.py          # 全局常量（版本/文件名/编码/加密与备份参数/验证参数）与更新日志
 ├── ui.py              # Color、SystemLog、视觉宽度排版、头部与游戏列表渲染、更新日志打印
 ├── logging_sys.py     # log_exit 异常退出日志 + setup_exit_handler(excepthook)
 ├── storage.py         # 盘符枚举/选择、数据目录定位、游戏列表读写(GB18030)、隐藏属性

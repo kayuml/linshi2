@@ -12,6 +12,7 @@ from winrt.windows.security.credentials.ui import UserConsentVerifierAvailabilit
 import pyotp
 import qrcode
 
+from .config import DATA_FILE_ENCODING, DATETIME_FORMAT, SAFE_CONFIG_FILE_NAME, TOTP_ISSUER, TOTP_MAX_ATTEMPTS
 from .storage import get_or_create_data_folder, hide_file, unhide_file
 from .ui import Color, SystemLog
 
@@ -21,7 +22,7 @@ def generate_totp_key():
 
 def display_qr_code(key):
     # 使用TOTP密钥生成URI，用于QR码    
-    totp_uri = pyotp.totp.TOTP(key).provisioning_uri(name='MRNewGameLauncher', issuer_name='MRNewGameLauncher')    
+    totp_uri = pyotp.totp.TOTP(key).provisioning_uri(name=TOTP_ISSUER, issuer_name=TOTP_ISSUER)    
         
     # 生成并在终端显示QR码    
     qr = qrcode.QRCode()  # 引入QRCode类用于生成二维码    
@@ -40,14 +41,14 @@ def save_safe_config(key, frequency, last_verified, win_hello_enabled, folder_pa
     if folder_path is None:    
         folder_path = get_or_create_data_folder()    
         
-    file_path = os.path.join(folder_path, "MRNewGameLauncherSafeConfig.txt")    
+    file_path = os.path.join(folder_path, SAFE_CONFIG_FILE_NAME)    
         
     # 检查是否存在存储安全配置的文件    
     if os.path.exists(file_path):    
         unhide_file(file_path)  # 确保文件是可见的    
         
     # 以写入模式打开文件    
-    with open(file_path, "w", encoding="GB18030") as file: # 明确指定GB18030编码    
+    with open(file_path, "w", encoding=DATA_FILE_ENCODING) as file: # 明确指定GB18030编码    
         # 将TOTP密钥写入文件    
         file.write(f"TOTP密钥：{key}\n")    
         # 检查频率参数是否被提供    
@@ -88,14 +89,14 @@ def load_safe_config(folder_path=None):
     if folder_path is None:    
         folder_path = get_or_create_data_folder()    
         
-    file_path = os.path.join(folder_path, "MRNewGameLauncherSafeConfig.txt")    
+    file_path = os.path.join(folder_path, SAFE_CONFIG_FILE_NAME)    
         
     # 检查存储安全配置的文件是否存在    
     if not os.path.exists(file_path):    
         return None, None, None, False # 默认禁用    
     
     # 以读取模式打开文件，明确指定GB18030编码    
-    with open(file_path, "r", encoding="GB18030") as file:    
+    with open(file_path, "r", encoding=DATA_FILE_ENCODING) as file:    
         # 读取文件的所有行    
         lines = file.readlines()    
         # 如果文件中的行数少于3，则返回默认值    
@@ -155,7 +156,7 @@ def verify_totp(key, frequency, last_verified):
     if frequency != "每次验证" and last_verified:    
         try:    
             # 将上次验证的时间字符串转换为datetime对象    
-            last_verified_dt = datetime.datetime.strptime(last_verified, "%Y/%m/%d-%H:%M:%S")    
+            last_verified_dt = datetime.datetime.strptime(last_verified, DATETIME_FORMAT)    
             # 计算上次验证以来经过的小时数    
             elapsed_hours = (now - last_verified_dt).total_seconds() / 3600    
             # 如果经过的小时数小于设定频率，认为验证通过    
@@ -165,7 +166,7 @@ def verify_totp(key, frequency, last_verified):
              pass # 如果格式或类型错误，则忽略并继续要求验证    
     
     # 初始化尝试次数    
-    attempts = 3    
+    attempts = TOTP_MAX_ATTEMPTS    
     # 循环，直到尝试次数用完    
     while attempts > 0:    
         code = input(f"\n  {Color.GOLD}请输入TOTP码: {Color.RESET}").strip()    
@@ -180,7 +181,7 @@ def verify_totp(key, frequency, last_verified):
             # 如果输入正确，保存当前成功验证的信息    
             # 需要先加载一次配置以获取当前的 win_hello_enabled 状态    
             _, _, _, win_hello_enabled = load_safe_config()    
-            save_safe_config(key, frequency, now.strftime("%Y/%m/%d-%H:%M:%S"), win_hello_enabled)    
+            save_safe_config(key, frequency, now.strftime(DATETIME_FORMAT), win_hello_enabled)    
             return True  # 返回验证成功    
         else:    
             SystemLog.step("身份凭证验证", "fail")  

@@ -7,6 +7,7 @@ import os
 
 import pyotp
 
+from .config import DATETIME_FORMAT
 from .security import load_safe_config, save_safe_config
 from .ui import Color, SystemLog
 from .webdav import configure_webdav, manage_backups, perform_backup
@@ -31,9 +32,9 @@ def show_security_settings(folder_path=None):
         # 计算下次验证时间    
         if frequency not in ["每次验证", "无需验证"] and last_verified:    
             try:    
-                last_verified_dt = datetime.datetime.strptime(last_verified, "%Y/%m/%d-%H:%M:%S")    
+                last_verified_dt = datetime.datetime.strptime(last_verified, DATETIME_FORMAT)    
                 next_verification_dt = last_verified_dt + datetime.timedelta(hours=float(frequency))    
-                next_verification_time = next_verification_dt.strftime("%Y/%m/%d-%H:%M:%S")    
+                next_verification_time = next_verification_dt.strftime(DATETIME_FORMAT)    
             except (ValueError, TypeError):    
                 next_verification_time = "N/A" # 如果数据格式错误，则标记为N/A    
         else:    

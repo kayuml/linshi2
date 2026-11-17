@@ -9,6 +9,7 @@ import traceback
 
 import psutil
 
+from .config import CRASH_LOG_FILE_NAME, DATETIME_FORMAT, EMERGENCY_LOG_FILE_NAME, LOG_FILE_ENCODING
 from .storage import get_or_create_data_folder
 
 def log_exit(exit_type, value, traceback_obj, folder_path=None):    
@@ -28,12 +29,12 @@ def log_exit(exit_type, value, traceback_obj, folder_path=None):
             # 如果连数据文件夹都无法获取，则使用当前目录    
             folder_path = os.getcwd()    
     
-    log_path = os.path.join(folder_path, "MRNewGameLauncherCrashLog.txt")    
-    timestamp = datetime.datetime.now().strftime('%Y/%m/%d-%H:%M:%S')    
+    log_path = os.path.join(folder_path, CRASH_LOG_FILE_NAME)    
+    timestamp = datetime.datetime.now().strftime(DATETIME_FORMAT)    
         
     try:    
         # 确保使用 utf-8 编码写入日志文件，避免特殊字符导致的编码错误    
-        with open(log_path, "a", encoding="utf-8") as log_file:    
+        with open(log_path, "a", encoding=LOG_FILE_ENCODING) as log_file:    
             log_file.write(f"\n[{timestamp}] 程序异常退出\n")    
             log_file.write(f"异常类型: {exit_type.__name__}\n")    
             log_file.write(f"异常信息: {value}\n")    
@@ -60,7 +61,7 @@ def log_exit(exit_type, value, traceback_obj, folder_path=None):
         # 如果写入日志文件失败，尝试写入备用日志    
         try:    
             # 使用 utf-8 编码写入紧急日志    
-            with open("crash_emergency.log", "a", encoding="utf-8") as emergency_log:    
+            with open(EMERGENCY_LOG_FILE_NAME, "a", encoding=LOG_FILE_ENCODING) as emergency_log:    
                 emergency_log.write(f"[{timestamp}] 写入崩溃日志失败: {str(e)}\n")    
                 emergency_log.write(f"原始异常: {exit_type.__name__}: {value}\n")    
         except Exception:    

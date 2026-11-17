@@ -7,6 +7,7 @@ import re
 import threading
 
 from .about import show_about
+from .config import SAFE_CONFIG_FILE_NAME
 from .games import manage_games, show_archived_games, start_game
 from .logging_sys import setup_exit_handler
 from .security import display_qr_code, generate_totp_key, handle_toggle_hidden_games, load_safe_config, save_safe_config, verify_totp
@@ -35,7 +36,7 @@ def menu():
     create_or_update_version_file(folder_path)  # 版本文件初始化    
           
     # 检查并创建配置文件 (MRNewGameLauncherSafeConfig.txt)    
-    config_path = os.path.join(folder_path, "MRNewGameLauncherSafeConfig.txt")    
+    config_path = os.path.join(folder_path, SAFE_CONFIG_FILE_NAME)    
     if not os.path.exists(config_path):    
         key = generate_totp_key()    
         # 将生成的TOTP密钥保存到文件，并默认禁用Windows Hello选项    
