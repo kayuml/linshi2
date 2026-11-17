@@ -10,7 +10,7 @@ import pyotp
 from .config import DATETIME_FORMAT
 from .security import load_safe_config, save_safe_config
 from .ui import Color, SystemLog
-from .webdav import configure_webdav, manage_backups, perform_backup
+from .webdav import configure_webdav, manage_backups, perform_backup, perform_local_backup
 
 def show_security_settings(folder_path=None):
     """    
@@ -136,8 +136,9 @@ def show_settings_menu(folder_path=None):
                 print("     备份设置")    
                 print("=====================")    
                 print("1. 配置WebDAV服务器")    
-                print("2. 立即备份")    
-                print("3. 管理备份")    
+                print("2. 管理备份")    
+                print("3. 备份到云端")
+                print("4. 备份到本地")    
                 sub_choice = input("请选择：")    
     
                 if not sub_choice:    
@@ -146,9 +147,11 @@ def show_settings_menu(folder_path=None):
                 if sub_choice == "1":    
                     configure_webdav(folder_path)    
                 elif sub_choice == "2":    
-                    perform_backup(folder_path)    
-                elif sub_choice == "3":    
                     manage_backups(folder_path)    
+                elif sub_choice == "4":
+                    perform_local_backup(folder_path)
+                elif sub_choice == "3":    
+                    perform_backup(folder_path)    
                 else:    
                     SystemLog.warn("无效的选择，请重新输入。")  
                     input("按任意键继续...")    

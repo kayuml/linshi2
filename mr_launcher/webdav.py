@@ -210,130 +210,104 @@ def _acquire_backup_key(zip_file, filename, folder_path):
     SystemLog.info("建议在“管理备份”中使用“升级加密格式”将其迁移为v2，或删除后重新备份。")
     return derive_encryption_key(timestamp_match.group(1)), 1
 
-def perform_backup(folder_path=None):  
-    """      
-    执行备份操作，将游戏列表、TOTP数据和版本文件打包压缩，并上传到WebDAV服务器。
-    加密采用 v2：每备份随机 DEK，由本地 TOTP 种子经 HKDF 派生的 KEK 包裹后写入明文头部 keyfile.json。      
-    通过以下措施防止数据泄露和文件篡改：      
-    1. 文件名混淆：使用随机8位字符串重命名敏感文件（如MRNewGameLauncherGameList.txt、MRNewGameLauncherSafeConfig.txt、MRNewGameLauncherConfigVersion.txt）。      
-    2. AES-GCM加密：对所有文件的敏感数据进行加密      
-    3. 哈希校验：记录混淆文件名且加密后的文件和加密后的映射表的SHA256哈希值，并对备份文件进行完整性校验。      
-    4. 映射表：将混淆后的文件名与原始文件名的映射关系记录在manifest.mrmap文件中。      
-    5. 内存操作：全程使用内存中的文件操作，避免在磁盘上生成临时文件。      
-    6. 将所有混淆文件名且加密后的文件、加密后的映射表和加密后的校验文件打包为一个ZIP文件，并上传到WebDAV服务器进行备份。      
-    """      
-    if folder_path is None:      
-        folder_path = get_or_create_data_folder()      
-          
-    # 加载 WebDAV 配置      
-    client = _get_webdav_client(folder_path)
-    if client is None:
-        return
-      
-    # 生成备份文件名（基于当前时间）      
-    # 生成备份文件名（基于当前时间，仅用于命名/排序，不再承担安全职责）
-    timestamp = datetime.datetime.now().strftime(BACKUP_TIMESTAMP_FORMAT)
-    backup_filename = f"{BACKUP_FILE_PREFIX}{timestamp}{BACKUP_FILE_SUFFIX}"
-
-    # v2：读取本地 TOTP 种子 → 随机 DEK → 种子派生 KEK 包裹 DEK 写入明文头部
+def _build_backup_zip(folder_path):
+    """
+    在内存中构建 v2 加密备份包（WebDAV 备份与本地备份共用同一打包逻辑）。
+    返回 (zip_bytes, backup_filename)；缺少 TOTP 密钥或打包失败时返回 (None, None)。
+    """
     local_seed, _, _, _ = load_safe_config(folder_path)
     if not local_seed:
         SystemLog.warn("未找到TOTP密钥，无法创建加密备份。请先运行主程序生成密钥。")
-        input("按任意键继续...")
-        return
+        return None, None
+    timestamp = datetime.datetime.now().strftime(BACKUP_TIMESTAMP_FORMAT)
+    backup_filename = f"{BACKUP_FILE_PREFIX}{timestamp}{BACKUP_FILE_SUFFIX}"
     encryption_key = generate_dek()
     key_header = build_key_header(encryption_key, normalize_seed(local_seed))
-              
-    # 定义需要混淆的敏感文件列表      
-    sensitive_files = SENSITIVE_FILES
-          
-    manifest = {}      # 映射关系：混淆文件名 -> 原始文件名      
-    checksum_dict = {} # 存储每个加密后文件的SHA256哈希校验值      
-          
-    # 创建内存中的ZIP压缩包      
-    zip_buffer = io.BytesIO()      
-    try:    
-        SystemLog.step("正在打包敏感配置文件", "run")    
+    manifest = {}
+    checksum_dict = {}
+    zip_buffer = io.BytesIO()
+    try:
+        SystemLog.step("正在打包敏感配置文件", "run")
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             # 写入 v2 明文密钥头部（不含种子信息；DEK 被种子派生的 KEK 包裹）
-            zip_file.writestr(BACKUP_KEY_HEADER_NAME, key_header)      
-            # 对每个敏感文件进行混淆和加密处理      
-            for original_filename in sensitive_files:      
-                file_path = os.path.join(folder_path, original_filename)      
-                if os.path.exists(file_path):      
-                    # 读取文件内容，明确指定 GB18030 编码      
-                    with open(file_path, "r", encoding=DATA_FILE_ENCODING) as f:      
-                        content = f.read()      
-                              
-                    # 生成随机8位字符串作为混淆文件名      
-                    random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=OBFUSCATED_NAME_LENGTH))      
-                    obfuscated_filename = random_str + ENCRYPTED_FILE_SUFFIX      
-                    manifest[obfuscated_filename] = original_filename      
-                          
-                    # 使用GB18030编码将内容转换为二进制数据并加密      
-                    content_bytes = content.encode(DATA_FILE_ENCODING)      
-                    encrypted_data = encrypt_data(content_bytes, encryption_key)      
-                          
-                    # 计算每个混淆文件名且加密后的文件的SHA256哈希校验值      
-                    hash_value = hashlib.sha256(encrypted_data).hexdigest()      
-                    checksum_dict[obfuscated_filename] = hash_value      
-                          
-                    # 将混淆文件名且加密后的文件写入压缩包      
-                    zip_file.writestr(obfuscated_filename, encrypted_data)      
-                  
-            # 生成映射表文件 manifest.mrmap（记录混淆文件名与原始文件名的映射关系）      
-            manifest_lines = []      
-            for obf, orig in manifest.items():      
-                manifest_lines.append(f"{obf} → {orig}")      
-            manifest_content = "\n".join(manifest_lines)      
-            manifest_bytes = manifest_content.encode(DATA_FILE_ENCODING)      
-          
-            # 加密映射表      
-            encrypted_manifest = encrypt_data(manifest_bytes, encryption_key)      
-                  
-            # 计算加密后映射表文件的SHA256哈希校验值      
-            manifest_hash = hashlib.sha256(encrypted_manifest).hexdigest()      
-            checksum_dict[MANIFEST_FILE_NAME] = manifest_hash      
-                  
-            # 将加密后的映射表文件写入压缩包      
-            zip_file.writestr(MANIFEST_FILE_NAME, encrypted_manifest)      
-                  
-            # 生成校验文件 checksum.sha256（格式：文件名:哈希值）      
-            checksum_lines = []      
-            for filename, hash_val in checksum_dict.items():      
-                checksum_lines.append(f"{filename}:{hash_val}")      
-            checksum_content = "\n".join(checksum_lines)      
-            checksum_bytes = checksum_content.encode(DATA_FILE_ENCODING)      
-                  
-            # 加密校验文件      
-            encrypted_checksum = encrypt_data(checksum_bytes, encryption_key)      
-                  
-            # 将加密后的校验文件写入压缩包      
-            zip_file.writestr(CHECKSUM_FILE_NAME, encrypted_checksum)      
-              
-        SystemLog.step("配置文件打包加密", "done")    
-    
-        # 上传压缩包到 WebDAV 服务器      
-        SystemLog.step("正在上传备份文件到 WebDAV 服务器", "run")    
-        try:      
-            # 确保备份目录存在      
-            backup_dir = BACKUP_DIR_NAME      
-            
-            # 为上传初期的连接检查增加异常保护
-            if not client.check(backup_dir):      
-                client.mkdir(backup_dir)
-                  
-            zip_buffer.seek(0)  # 将指针重置到文件开头      
-            client.upload_to(buff=zip_buffer, remote_path=f"{backup_dir}/{backup_filename}")      
-            SystemLog.step(f"备份文件上传", "done")    
-            SystemLog.info(f"备份成功：{backup_filename}")    
-        except Exception as e:      
-            SystemLog.step("备份文件上传", "fail")    
-            SystemLog.warn(f"上传备份文件时出错或无法连接服务器: {e}")    
-    finally:      
-        zip_buffer.close()  # 关闭内存文件      
-          
+            zip_file.writestr(BACKUP_KEY_HEADER_NAME, key_header)
+            for original_filename in SENSITIVE_FILES:
+                file_path = os.path.join(folder_path, original_filename)
+                if os.path.exists(file_path):
+                    with open(file_path, "r", encoding=DATA_FILE_ENCODING) as f:
+                        content = f.read()
+                    random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=OBFUSCATED_NAME_LENGTH))
+                    obfuscated_filename = random_str + ENCRYPTED_FILE_SUFFIX
+                    manifest[obfuscated_filename] = original_filename
+                    encrypted_data = encrypt_data(content.encode(DATA_FILE_ENCODING), encryption_key)
+                    checksum_dict[obfuscated_filename] = hashlib.sha256(encrypted_data).hexdigest()
+                    zip_file.writestr(obfuscated_filename, encrypted_data)
+            manifest_bytes = "\n".join(f"{obf} → {orig}" for obf, orig in manifest.items()).encode(DATA_FILE_ENCODING)
+            encrypted_manifest = encrypt_data(manifest_bytes, encryption_key)
+            checksum_dict[MANIFEST_FILE_NAME] = hashlib.sha256(encrypted_manifest).hexdigest()
+            zip_file.writestr(MANIFEST_FILE_NAME, encrypted_manifest)
+            checksum_bytes = "\n".join(f"{fn}:{hv}" for fn, hv in checksum_dict.items()).encode(DATA_FILE_ENCODING)
+            zip_file.writestr(CHECKSUM_FILE_NAME, encrypt_data(checksum_bytes, encryption_key))
+        SystemLog.step("配置文件打包加密", "done")
+        return zip_buffer.getvalue(), backup_filename
+    except Exception as e:
+        SystemLog.step("配置文件打包加密", "fail")
+        SystemLog.warn(f"打包备份时出错: {e}")
+        return None, None
+    finally:
+        zip_buffer.close()
+
+def perform_backup(folder_path=None):
+    """
+    执行云端备份：构建 v2 加密包并上传到 WebDAV 服务器。
+    加密采用 v2：每备份随机 DEK，由本地 TOTP 种子经 HKDF 派生的 KEK 包裹后写入明文头部 keyfile.json。
+    """
+    if folder_path is None:
+        folder_path = get_or_create_data_folder()
+    client = _get_webdav_client(folder_path)
+    if client is None:
+        return
+    zip_bytes, backup_filename = _build_backup_zip(folder_path)
+    if zip_bytes is None:
+        input("按任意键继续...")
+        return
+    SystemLog.step("正在上传备份文件到 WebDAV 服务器", "run")
+    try:
+        backup_dir = BACKUP_DIR_NAME
+        if not client.check(backup_dir):
+            client.mkdir(backup_dir)
+        client.upload_to(buff=io.BytesIO(zip_bytes), remote_path=f"{backup_dir}/{backup_filename}")
+        SystemLog.step("备份文件上传", "done")
+        SystemLog.info(f"备份成功：{backup_filename}")
+    except Exception as e:
+        SystemLog.step("备份文件上传", "fail")
+        SystemLog.warn(f"上传备份文件时出错或无法连接服务器: {e}")
     input("按任意键继续...")
+
+def perform_local_backup(folder_path=None):
+    """
+    执行本地备份：构建与云端备份完全相同的 v2 加密包，直接保存到数据目录（MRNewGameLauncherData）内。
+    无需配置 WebDAV，可离线使用；压缩包不设置隐藏属性，便于自行复制到其他位置保管。
+    如需恢复，可将该包上传到 WebDAV 备份目录后通过"管理备份"恢复。
+    """
+    if folder_path is None:
+        folder_path = get_or_create_data_folder()
+    zip_bytes, backup_filename = _build_backup_zip(folder_path)
+    if zip_bytes is None:
+        input("按任意键继续...")
+        return
+    local_path = os.path.join(folder_path, backup_filename)
+    try:
+        with open(local_path, "wb") as f:
+            f.write(zip_bytes)
+        SystemLog.info(f"本地备份成功：{local_path}")
+        SystemLog.info("该压缩包与云端备份格式一致（v2加密），可复制到其他位置保管。")
+    except PermissionError:
+        SystemLog.warn("权限不足，无法写入本地备份。请检查文件夹写入权限或尝试以管理员身份运行。")
+    except Exception as e:
+        SystemLog.warn(f"写入本地备份时出错: {e}")
+    input("按任意键继续...")
+
 
 def decrypt_all_files(zip_file, encryption_key, exclude_files=None):
     """    
@@ -475,7 +449,7 @@ def check_version_compatibility(backup_version):
         return False, f"主版本不兼容（当前：{VERSION}，备份：{backup_version}）"    
     return True, ""
 
-def restore_backup(client, folder_path, backup_file, restore_gamelist=False, restore_safe_config=False):  
+def restore_backup(client, folder_path, backup_file, restore_gamelist=False, restore_safe_config=False, zip_data=None):  
     """        
     从备份文件中恢复游戏列表和/或安全配置。      
     验证失败时不还原任何文件。        
@@ -486,20 +460,24 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
     包含版本兼容性检查以及备份文件完整性验证与映射表解析        
     """        
     try:        
-        # 第一阶段：下载备份文件到内存        
-        SystemLog.step("正在从远程 WebDAV 下载备份包", "run")    
-        zip_buffer = io.BytesIO()        
-        
-        # 增加对远程下载的网络异常处理
-        try:
-            client.download_from(buff=zip_buffer, remote_path=backup_file)        
-        except Exception as e:
-            SystemLog.step("远程下载失败", "fail")
-            SystemLog.warn(f"从 WebDAV 下载备份文件时发生错误: {e}")
-            input("按任意键继续...")
-            return
+        # 第一阶段：取得备份包数据（优先复用已下载数据，否则从远程下载）
+        zip_buffer = io.BytesIO()
+        if zip_data is not None:
+            zip_buffer.write(zip_data)
+            zip_buffer.seek(0)
+        else:
+            SystemLog.step("正在从远程 WebDAV 下载备份包", "run")
+            # 增加对远程下载的网络异常处理
+            try:
+                client.download_from(buff=zip_buffer, remote_path=backup_file)
+            except Exception as e:
+                SystemLog.step("远程下载失败", "fail")
+                SystemLog.warn(f"从 WebDAV 下载备份文件时发生错误: {e}")
+                input("按任意键继续...")
+                return
+            zip_buffer.seek(0)
+            SystemLog.step("远程备份包下载", "done")
 
-        zip_buffer.seek(0)        
         SystemLog.step("远程备份包下载", "done")    
                 
         with zipfile.ZipFile(zip_buffer, 'r') as zip_file:        
@@ -779,50 +757,89 @@ def manage_backups(folder_path=None):
         input("按任意键继续...")        
         return        
             
-    selected_backup = backup_files[int(choice) - 1]        
-    remote_path = f"{backup_dir}/{selected_backup}"        
-            
-    # 提供操作选项        
-    print("1. 恢复游戏列表")        
-    print("2. 恢复安全配置")      
-    print("3. 全部恢复")        
+    selected_backup = backup_files[int(choice) - 1]
+    remote_path = f"{backup_dir}/{selected_backup}"
+
+    # 选中后先下载一次用于格式识别（备份包很小），后续恢复/迁移复用该数据，避免二次下载
+    SystemLog.step("正在读取备份包以识别格式", "run")
+    detect_buffer = io.BytesIO()
+    try:
+        client.download_from(buff=detect_buffer, remote_path=remote_path)
+    except Exception as e:
+        SystemLog.step("备份包读取", "fail")
+        SystemLog.warn(f"下载备份文件时出错: {e}")
+        input("按任意键继续...")
+        return
+    zip_data = detect_buffer.getvalue()
+    detect_buffer.close()
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
+            is_v2 = BACKUP_KEY_HEADER_NAME in zf.namelist()
+        SystemLog.step("备份包格式识别", "done")
+    except Exception as e:
+        SystemLog.step("备份包格式识别", "fail")
+        SystemLog.warn(f"无法读取备份包（可能已损坏）: {e}")
+        input("按任意键继续...")
+        return
+
+    # 提供操作选项（按格式标注；v2 包的升级选项置灰保留，不隐藏）
+    format_tag = f"{Color.GREEN}[v2]{Color.RESET}" if is_v2 else f"{Color.RED}[旧格式·等效明文]{Color.RESET}"
+    print(f"\n已选择: {selected_backup} {format_tag}")
+    print("1. 恢复游戏列表")
+    print("2. 恢复安全配置")
+    print("3. 全部恢复")
     print("4. 删除备份")
-    print("5. 升级加密格式（旧包→v2）")        
-    operation = input("请选择操作（直接回车返回）：")        
-            
-    if not operation:        
-        return  # 返回到上一级菜单        
-            
-    if operation == "1":        
-        restore_backup(client, folder_path, remote_path, restore_gamelist=True, restore_safe_config=False)      
-    elif operation == "2":        
-        restore_backup(client, folder_path, remote_path, restore_gamelist=False, restore_safe_config=True)      
-    elif operation == "3":        
-        restore_backup(client, folder_path, remote_path, restore_gamelist=True, restore_safe_config=True)      
+    if is_v2:
+        print(f"{Color.GRAY}5. 升级加密格式（已是v2，无需迁移）{Color.RESET}")
+    else:
+        print("5. 升级加密格式（旧包→v2）")
+    operation = input("请选择操作（直接回车返回）：")
+
+    if not operation:
+        return  # 返回到上一级菜单
+
+    if operation == "1":
+        restore_backup(client, folder_path, remote_path, restore_gamelist=True, restore_safe_config=False, zip_data=zip_data)
+    elif operation == "2":
+        restore_backup(client, folder_path, remote_path, restore_gamelist=False, restore_safe_config=True, zip_data=zip_data)
+    elif operation == "3":
+        restore_backup(client, folder_path, remote_path, restore_gamelist=True, restore_safe_config=True, zip_data=zip_data)
+    elif operation == "4":
+        try:
+            SystemLog.step(f"正在删除备份文件: {selected_backup}", "run")
+            # 使用 clean 方法删除文件
+            client.clean(remote_path)
+            SystemLog.step("备份文件删除", "done")
+            SystemLog.info(f"备份文件 {selected_backup} 已删除。")
+        except Exception as e:
+            SystemLog.step("备份文件删除", "fail")
+            SystemLog.warn(f"删除备份文件时出错: {e}")
+        input("按任意键继续...")
     elif operation == "5":
-        migrate_backup_to_v2(client, folder_path, remote_path)
-    elif operation == "4":        
-        try:        
-            SystemLog.step(f"正在删除备份文件: {selected_backup}", "run")    
-            # 使用 clean 方法删除文件        
-            client.clean(remote_path)        
-            SystemLog.step("备份文件删除", "done")    
-            SystemLog.info(f"备份文件 {selected_backup} 已删除。")    
-        except Exception as e:        
-            SystemLog.step("备份文件删除", "fail")    
-            SystemLog.warn(f"删除备份文件时出错: {e}")        
-        input("按任意键继续...")        
-    else:        
-        SystemLog.warn("无效的选择，请重新输入。")    
+        if is_v2:
+            SystemLog.info("该备份已是v2加密格式，无需迁移。")
+            input("按任意键继续...")
+        else:
+            migrate_backup_to_v2(client, folder_path, remote_path, zip_data=zip_data)
+    else:
+        SystemLog.warn("无效的选择，请重新输入。")
         input("按任意键继续...")
 
-def migrate_backup_to_v2(client, folder_path, backup_file):
+
+def migrate_backup_to_v2(client, folder_path, backup_file, zip_data=None):
     """将旧格式(v1)备份一键升级为v2（用户主动选择）。失败不上传不删除；是否删旧包由用户决定。"""
-    SystemLog.step("正在下载待迁移的备份包", "run"); zip_buffer = io.BytesIO()
-    try:
-        client.download_from(buff=zip_buffer, remote_path=backup_file)
-    except Exception as e:
-        SystemLog.step("远程下载失败", "fail"); SystemLog.warn(f"下载备份文件时出错: {e}"); input("按任意键继续..."); return
+    zip_buffer = io.BytesIO()
+    if zip_data is not None:
+        zip_buffer.write(zip_data)
+        zip_buffer.seek(0)
+    else:
+        SystemLog.step("正在下载待迁移的备份包", "run")
+        try:
+            client.download_from(buff=zip_buffer, remote_path=backup_file)
+        except Exception as e:
+            SystemLog.step("远程下载失败", "fail"); SystemLog.warn(f"下载备份文件时出错: {e}"); input("按任意键继续..."); return
+        zip_buffer.seek(0); SystemLog.step("待迁移备份包下载", "done")
+
     zip_buffer.seek(0); SystemLog.step("待迁移备份包下载", "done")
     try:
         with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
