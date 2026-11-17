@@ -463,40 +463,14 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
     包含版本兼容性检查以及备份文件完整性验证与映射表解析        
     """        
     try:        
-        # 第一阶段：取得备份包数据（优先复用已下载数据，否则从远程下载）
-        zip_buffer = io.BytesIO()
-        if zip_data is not None:
-            # 数据已由调用方传入（管理备份预读），显示来源标识
-            if local_path is not None:
-                SystemLog.info("（已获取）本地备份包")
-            else:
-                SystemLog.info("（已获取）云端备份包")
-            zip_buffer.write(zip_data)
-            zip_buffer.seek(0)
-        else:
-            if local_path is not None:
-                SystemLog.step("正在读取本地备份包", "run")
-                try:
-                    with open(local_path, "rb") as f:
-                        zip_buffer.write(f.read())
-                except Exception as e:
-                    SystemLog.step("本地备份读取", "fail")
-                    SystemLog.warn(f"读取本地备份文件时出错: {e}")
-                    input("按任意键继续...")
-                    return
-                zip_buffer.seek(0)
-                SystemLog.step("本地备份包读取", "done")
-            else:
-                SystemLog.step("正在从云端下载备份包", "run")
-                try:
-                    client.download_from(buff=zip_buffer, remote_path=backup_file)
-                except Exception as e:
-                    SystemLog.step("云端下载失败", "fail")
-                    SystemLog.warn(f"从 WebDAV 下载备份文件时发生错误: {e}")
-                    input("按任意键继续...")
-                    return
-                zip_buffer.seek(0)
-                SystemLog.step("云端备份包下载", "done")
+        # 第一阶段：备份包数据由调用方（管理备份）预读后传入
+        if zip_data is None:
+            SystemLog.warn("缺少备份包数据，无法继续")
+            input("按任意键继续...")
+            return
+        source_tag = "本地" if local_path is not None else "云端"
+        SystemLog.info(f"来源：{source_tag}备份包（已由调用方预读）")
+        zip_buffer = io.BytesIO(zip_data)
 
                 
         with zipfile.ZipFile(zip_buffer, 'r') as zip_file:        
