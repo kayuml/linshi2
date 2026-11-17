@@ -554,7 +554,11 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
             if version_file_obf and version_file_obf in decrypted_files:        
                 try:        
                     version_bytes = decrypted_files[version_file_obf]        
-                    version_content = version_bytes.decode(VERSION_FILE_ENCODING)        
+                    try:
+                        version_content = version_bytes.decode(VERSION_FILE_ENCODING)
+                    except UnicodeDecodeError:
+                        # 兼容 v39.0 及更早版本使用 GB18030 编码的旧备份
+                        version_content = version_bytes.decode(DATA_FILE_ENCODING)        
                     backup_version = version_content.split('Ver：')[-1].strip()        
                 except Exception as e:        
                     SystemLog.step("版本兼容性检查", "fail")    
