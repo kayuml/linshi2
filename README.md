@@ -15,8 +15,8 @@ mr_launcher/
 ├── security.py        # TOTP 密钥生成/二维码、safe_config 读写、TOTP 验证、Windows Hello、隐藏游戏切换
 ├── games.py           # 游戏增删改、交互式排序、打开目录、管理菜单、归档显示、启动游戏
 ├── about.py           # 关于页面与完整更新日志
-├── crypto.py          # PBKDF2-HMAC 密钥派生 + AES-GCM 加解密
-├── webdav.py          # WebDAV 配置、备份(打包/加密/SHA256)、完整性校验、恢复
+├── crypto.py          # v1 PBKDF2(仅旧包恢复) + v2 HKDF种子包裹随机密钥 + AES-GCM 加解密
+├── webdav.py          # WebDAV 配置、备份(v2加密/打包/SHA256)、完整性校验、恢复、旧包一键迁移
 ├── settings_menu.py   # 安全设置子菜单与设置主菜单
 └── main.py            # menu() 主循环
 ```
@@ -36,3 +36,10 @@ python MRNewGameLauncher39_0_main.py
 - 每个函数/类均通过 AST 逐字比对，与原文件 52 个顶层定义完全一致；仅按各函数的实际引用拆分 import。
 - 模块间依赖为单向分层：config ← crypto/storage/ui ← security/games/webdav ← settings_menu/main，无循环导入。
 - 原单文件仍保留在仓库根目录，可继续独立运行（Linux 下因缺少 win32api/msvcrt 无法运行属预期行为）。
+
+## 备份加密 v2（TOTP 种子包裹随机密钥）
+
+- 每备份独立随机 256 位 DEK 加密包内文件；DEK 由本地 TOTP 种子经 HKDF-SHA256（随机盐）派生的 KEK 以 AES-GCM 包裹，存于包内明文头部 `keyfile.json`（头部作 AAD 防篡改）。文件名时间戳不再承担安全职责。
+- **首次运行强制回输 TOTP 密钥确认已保存**：该密钥同时是备份解密密钥，未保存则换机后无法恢复备份。
+- 同机备份/恢复零新增交互；异机恢复需输入当初保存的 TOTP 密钥字符串（最多3次），随后沿用现有 TOTP 验证码授权。
+- 旧 v1 备份仍可恢复（会警告强度极弱）；可在“管理备份 → 5. 升级加密格式”由用户主动一键迁移为 v2（生成 `_v2.zip`，上传前自校验，是否删旧包由用户决定）。

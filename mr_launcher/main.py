@@ -10,7 +10,7 @@ from .about import show_about
 from .config import SAFE_CONFIG_FILE_NAME
 from .games import manage_games, show_archived_games, start_game
 from .logging_sys import setup_exit_handler
-from .security import display_qr_code, generate_totp_key, handle_toggle_hidden_games, load_safe_config, save_safe_config, verify_totp
+from .security import display_qr_code, generate_totp_key, handle_toggle_hidden_games, load_safe_config, normalize_seed, save_safe_config, verify_totp
 from .settings_menu import show_settings_menu
 from .storage import create_or_update_version_file, get_or_create_data_folder, load_game_list
 from .ui import Color, SystemLog, display_game_list, draw_header
@@ -46,7 +46,18 @@ def menu():
         # 提示用户显示该密钥的QR码    
         SystemLog.info("TOTP密钥的QR码:")  
         display_qr_code(key) # 通过QR码展示密钥，方便用户扫描保存    
-        SystemLog.info("请妥善保管您的TOTP密钥")  
+        SystemLog.warn("此密钥同时是备份解密密钥：未保存将无法在其他设备上恢复备份！")
+        SystemLog.info("请复制并妥善保存上方密钥（建议离线保存），随后需回输一次以确认已保存。")
+        while True:
+            confirm = input(f"\n  {Color.GOLD}请输入上方显示的TOTP密钥以确认已保存（直接回车退出程序）: {Color.RESET}").strip()
+            if not confirm:
+                SystemLog.warn("未确认保存密钥，程序退出。请重新运行并保存密钥。")
+                return
+            if normalize_seed(confirm) == normalize_seed(key):
+                SystemLog.success("密钥保存确认成功。")
+                break
+            SystemLog.warn("输入与显示的密钥不一致，请核对后重新输入。")
+            SystemLog.info(f"TOTP密钥: {key}")  
         input("按任意键继续...")    
         os.system('cls' if os.name == 'nt' else 'clear') # 清屏    
       

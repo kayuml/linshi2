@@ -127,6 +127,17 @@ TOTP_MAX_ATTEMPTS = 3
 # 验证时间/崩溃日志使用的时间格式
 DATETIME_FORMAT = "%Y/%m/%d-%H:%M:%S"
 
+# ---- 备份加密 v2（TOTP 种子派生包裹密钥）----
+BACKUP_KEY_HEADER_NAME = "keyfile.json"
+BACKUP_FORMAT_MAGIC = "MRBK"
+BACKUP_FORMAT_VERSION = 2
+BACKUP_KEK_KDF = "HKDF-SHA256"
+BACKUP_KEK_SALT_LENGTH = 16
+BACKUP_KEK_INFO = b"MRNewGameLauncher-backup-v2-kek"
+BACKUP_DEK_LENGTH = 32
+BACKUP_SEED_MAX_ATTEMPTS = 3
+MIGRATED_FILE_SUFFIX = "_v2"
+
 # ==================== 更新日志 ====================
 
 # 更新日志数据结构

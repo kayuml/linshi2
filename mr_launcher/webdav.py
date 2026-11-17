@@ -3,6 +3,7 @@
 """MR 新游戏启动器 v39.0 —— webdav 模块（由 MRNewGameLauncher39.0.py 模块化重构而来，逻辑保持不变）。"""
 
 import datetime
+import getpass
 import hashlib
 import io
 import os
@@ -35,9 +36,13 @@ from .config import (
     WEBDAV_ENCODING,
     WEBDAV_MAX_ATTEMPTS,
     WEBDAV_RETRY_DELAY,
+    BACKUP_KEY_HEADER_NAME,
+    BACKUP_SEED_MAX_ATTEMPTS,
+    MIGRATED_FILE_SUFFIX,
 )
-from .crypto import decrypt_data, derive_encryption_key, encrypt_data
-from .security import display_qr_code, load_safe_config
+from .crypto import (BackupFormatError, BackupUnlockError, build_key_header, decrypt_data,
+    derive_encryption_key, encrypt_data, generate_dek, unwrap_dek_from_header)
+from .security import display_qr_code, load_safe_config, normalize_seed
 from .storage import get_or_create_data_folder, hide_file, unhide_file
 from .ui import Color, SystemLog
 
@@ -160,9 +165,55 @@ def test_webdav_connection(url, username, password, max_attempts=WEBDAV_MAX_ATTE
         
     return False
 
+def _get_webdav_client(folder_path):
+    """读取 WebDAV 配置并初始化客户端；未配置或读取失败时返回 None。"""
+    webdav_config_path = os.path.join(folder_path, WEBDAV_CONFIG_FILE_NAME)
+    if not os.path.exists(webdav_config_path):
+        SystemLog.warn("未配置 WebDAV 服务器，请先配置 WebDAV 服务器。"); input("按任意键继续..."); return None
+    try:
+        with open(webdav_config_path, "r", encoding=DATA_FILE_ENCODING) as file:
+            lines = file.readlines()
+            webdav_url = lines[0].strip().replace("WebDAV URL: ", ""); username = lines[1].strip().replace("Username: ", ""); password = lines[2].strip().replace("Password: ", "")
+    except Exception as e:
+        SystemLog.warn(f"读取 WebDAV 配置时出错: {e}"); input("按任意键继续..."); return None
+    return Client({'webdav_hostname': webdav_url, 'webdav_login': username, 'webdav_password': password, 'webdav_encoding': WEBDAV_ENCODING})
+
+def _acquire_backup_key(zip_file, filename, folder_path):
+    """判定格式并取得解密密钥。返回 (key, version)；取消/无法解锁返回 (None, 0)。头部损坏硬性中止，绝不回退v1。"""
+    if BACKUP_KEY_HEADER_NAME in zip_file.namelist():
+        header_bytes = zip_file.read(BACKUP_KEY_HEADER_NAME)
+        local_seed, _, _, _ = load_safe_config(folder_path)
+        if local_seed:
+            try:
+                return unwrap_dek_from_header(header_bytes, normalize_seed(local_seed)), 2
+            except BackupFormatError as e:
+                SystemLog.warn(f"备份密钥头部损坏: {e}"); return None, 0
+            except BackupUnlockError:
+                pass
+        SystemLog.info("本地TOTP密钥无法解开此备份，需要输入备份时使用的TOTP密钥。")
+        attempts = BACKUP_SEED_MAX_ATTEMPTS
+        while attempts > 0:
+            seed = getpass.getpass(f"  {Color.GOLD}请输入备份时使用的TOTP密钥（直接回车取消）: {Color.RESET}").strip()
+            if not seed:
+                SystemLog.warn("已取消输入，无法解密该备份。"); return None, 0
+            try:
+                return unwrap_dek_from_header(header_bytes, normalize_seed(seed)), 2
+            except BackupFormatError as e:
+                SystemLog.warn(f"备份密钥头部损坏: {e}"); return None, 0
+            except BackupUnlockError as e:
+                attempts -= 1; SystemLog.warn(f"{e}（剩余 {attempts} 次机会）")
+        SystemLog.warn("多次输入均不正确，无法解密该备份。"); return None, 0
+    timestamp_match = re.search(BACKUP_FILENAME_PATTERN, filename)
+    if not timestamp_match:
+        SystemLog.warn("备份文件名格式不正确，无法提取时间戳进行解密。"); return None, 0
+    SystemLog.warn("此为旧格式(v1)备份：密钥由文件名时间戳派生，加密强度极弱、等效明文。")
+    SystemLog.info("建议在“管理备份”中使用“升级加密格式”将其迁移为v2，或删除后重新备份。")
+    return derive_encryption_key(timestamp_match.group(1)), 1
+
 def perform_backup(folder_path=None):  
     """      
-    执行备份操作，将游戏列表、TOTP数据和版本文件打包压缩，并上传到WebDAV服务器。      
+    执行备份操作，将游戏列表、TOTP数据和版本文件打包压缩，并上传到WebDAV服务器。
+    加密采用 v2：每备份随机 DEK，由本地 TOTP 种子经 HKDF 派生的 KEK 包裹后写入明文头部 keyfile.json。      
     通过以下措施防止数据泄露和文件篡改：      
     1. 文件名混淆：使用随机8位字符串重命名敏感文件（如MRNewGameLauncherGameList.txt、MRNewGameLauncherSafeConfig.txt、MRNewGameLauncherConfigVersion.txt）。      
     2. AES-GCM加密：对所有文件的敏感数据进行加密      
@@ -175,40 +226,23 @@ def perform_backup(folder_path=None):
         folder_path = get_or_create_data_folder()      
           
     # 加载 WebDAV 配置      
-    webdav_config_path = os.path.join(folder_path, WEBDAV_CONFIG_FILE_NAME)      
-    if not os.path.exists(webdav_config_path):      
-        SystemLog.warn("未配置 WebDAV 服务器，请先配置 WebDAV 服务器。")    
-        input("按任意键继续...")      
-        return      
-          
-    # 读取 WebDAV 配置      
-    try:      
-        # 明确指定 GB18030 编码读取配置      
-        with open(webdav_config_path, "r", encoding=DATA_FILE_ENCODING) as file:      
-            lines = file.readlines()      
-            webdav_url = lines[0].strip().replace("WebDAV URL: ", "")      
-            username = lines[1].strip().replace("Username: ", "")      
-            password = lines[2].strip().replace("Password: ", "")      
-    except Exception as e:      
-        SystemLog.warn(f"读取 WebDAV 配置时出错: {e}")    
-        input("按任意键继续...")      
-        return      
-          
-    # 初始化 WebDAV 客户端      
-    options = {      
-        'webdav_hostname': webdav_url,      
-        'webdav_login': username,      
-        'webdav_password': password,      
-        'webdav_encoding': WEBDAV_ENCODING # 增加 WebDAV 编码设置    
-    }      
-    client = Client(options)      
+    client = _get_webdav_client(folder_path)
+    if client is None:
+        return
       
     # 生成备份文件名（基于当前时间）      
-    timestamp = datetime.datetime.now().strftime(BACKUP_TIMESTAMP_FORMAT)      
-    backup_filename = f"{BACKUP_FILE_PREFIX}{timestamp}{BACKUP_FILE_SUFFIX}"      
-          
-    # 生成加密密钥（基于时间戳）      
-    encryption_key = derive_encryption_key(timestamp)      
+    # 生成备份文件名（基于当前时间，仅用于命名/排序，不再承担安全职责）
+    timestamp = datetime.datetime.now().strftime(BACKUP_TIMESTAMP_FORMAT)
+    backup_filename = f"{BACKUP_FILE_PREFIX}{timestamp}{BACKUP_FILE_SUFFIX}"
+
+    # v2：读取本地 TOTP 种子 → 随机 DEK → 种子派生 KEK 包裹 DEK 写入明文头部
+    local_seed, _, _, _ = load_safe_config(folder_path)
+    if not local_seed:
+        SystemLog.warn("未找到TOTP密钥，无法创建加密备份。请先运行主程序生成密钥。")
+        input("按任意键继续...")
+        return
+    encryption_key = generate_dek()
+    key_header = build_key_header(encryption_key, normalize_seed(local_seed))
               
     # 定义需要混淆的敏感文件列表      
     sensitive_files = SENSITIVE_FILES
@@ -220,7 +254,9 @@ def perform_backup(folder_path=None):
     zip_buffer = io.BytesIO()      
     try:    
         SystemLog.step("正在打包敏感配置文件", "run")    
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:      
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # 写入 v2 明文密钥头部（不含种子信息；DEK 被种子派生的 KEK 包裹）
+            zip_file.writestr(BACKUP_KEY_HEADER_NAME, key_header)      
             # 对每个敏感文件进行混淆和加密处理      
             for original_filename in sensitive_files:      
                 file_path = os.path.join(folder_path, original_filename)      
@@ -390,7 +426,7 @@ def verify_backup_integrity(zip_file, encryption_key):
         # 遍历备份文件中的所有文件    
         for filename in zip_file.namelist():    
             # 跳过校验文件本身    
-            if filename == CHECKSUM_FILE_NAME:    
+            if filename == CHECKSUM_FILE_NAME or filename == BACKUP_KEY_HEADER_NAME:    
                 continue    
                 
             # 读取文件内容    
@@ -467,21 +503,15 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
         SystemLog.step("远程备份包下载", "done")    
                 
         with zipfile.ZipFile(zip_buffer, 'r') as zip_file:        
-            # 1. 从文件名中提取时间戳        
-            # 格式: backup_YYYY.MM.DD_HH-MM-SS.zip        
-            SystemLog.step("正在解析备份元数据", "run")    
-            filename = os.path.basename(backup_file)        
-            timestamp_match = re.search(BACKUP_FILENAME_PATTERN, filename)    
-            if not timestamp_match:    
-                SystemLog.step("备份元数据解析", "fail")    
-                SystemLog.warn("备份文件名格式不正确，无法提取时间戳进行解密。")    
-                input("按任意键继续...")    
-                return    
-            timestamp = timestamp_match.group(1)    
-                        
-            # 生成用于解密的加密密钥（基于文件名中的时间戳）        
-            encryption_key = derive_encryption_key(timestamp)        
-            SystemLog.step("备份元数据解析", "done")    
+            # 1. 判定格式并取得解密密钥（v2 种子包裹 / v1 时间戳兼容）
+            SystemLog.step("正在解析备份元数据", "run")
+            filename = os.path.basename(backup_file)
+            encryption_key, fmt_version = _acquire_backup_key(zip_file, filename, folder_path)
+            if encryption_key is None:
+                SystemLog.step("备份元数据解析", "fail")
+                input("按任意键继续...")
+                return
+            SystemLog.step("备份元数据解析", "done")
     
             # 2. 验证备份完整性：检查必需文件和哈希校验        
             SystemLog.step("正在验证备份文件完整性", "run")    
@@ -506,7 +536,7 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                         
             # 3. 解密所有文件（除了校验文件，因为它已经在验证过程中被解密）        
             SystemLog.step("正在解密所有配置文件数据", "run")    
-            decrypted_files = decrypt_all_files(zip_file, encryption_key, exclude_files=[CHECKSUM_FILE_NAME])        
+            decrypted_files = decrypt_all_files(zip_file, encryption_key, exclude_files=[CHECKSUM_FILE_NAME, BACKUP_KEY_HEADER_NAME])        
             if decrypted_files is None:        
                 SystemLog.step("配置文件数据解密", "fail")    
                 SystemLog.warn("解密文件失败，无法继续恢复操作。")    
@@ -702,33 +732,9 @@ def manage_backups(folder_path=None):
         folder_path = get_or_create_data_folder()        
             
     # 加载 WebDAV 配置        
-    webdav_config_path = os.path.join(folder_path, WEBDAV_CONFIG_FILE_NAME)        
-    if not os.path.exists(webdav_config_path):        
-        SystemLog.warn("未配置 WebDAV 服务器，请先配置 WebDAV 服务器。")    
-        input("按任意键继续...")        
-        return        
-            
-    # 读取 WebDAV 配置        
-    try:        
-        # 明确指定 GB18030 编码读取配置      
-        with open(webdav_config_path, "r", encoding=DATA_FILE_ENCODING) as file:      
-            lines = file.readlines()        
-            webdav_url = lines[0].strip().replace("WebDAV URL: ", "")        
-            username = lines[1].strip().replace("Username: ", "")        
-            password = lines[2].strip().replace("Password: ", "")        
-    except Exception as e:        
-        SystemLog.warn(f"读取 WebDAV 配置时出错: {e}")    
-        input("按任意键继续...")        
-        return        
-            
-    # 初始化 WebDAV 客户端        
-    options = {        
-        'webdav_hostname': webdav_url,        
-        'webdav_login': username,        
-        'webdav_password': password,        
-        'webdav_encoding': WEBDAV_ENCODING # 增加 WebDAV 编码设置    
-    }        
-    client = Client(options)        
+    client = _get_webdav_client(folder_path)
+    if client is None:
+        return
             
     # 获取备份文件列表        
     backup_dir = BACKUP_DIR_NAME        
@@ -780,7 +786,8 @@ def manage_backups(folder_path=None):
     print("1. 恢复游戏列表")        
     print("2. 恢复安全配置")      
     print("3. 全部恢复")        
-    print("4. 删除备份")        
+    print("4. 删除备份")
+    print("5. 升级加密格式（旧包→v2）")        
     operation = input("请选择操作（直接回车返回）：")        
             
     if not operation:        
@@ -792,6 +799,8 @@ def manage_backups(folder_path=None):
         restore_backup(client, folder_path, remote_path, restore_gamelist=False, restore_safe_config=True)      
     elif operation == "3":        
         restore_backup(client, folder_path, remote_path, restore_gamelist=True, restore_safe_config=True)      
+    elif operation == "5":
+        migrate_backup_to_v2(client, folder_path, remote_path)
     elif operation == "4":        
         try:        
             SystemLog.step(f"正在删除备份文件: {selected_backup}", "run")    
@@ -806,3 +815,81 @@ def manage_backups(folder_path=None):
     else:        
         SystemLog.warn("无效的选择，请重新输入。")    
         input("按任意键继续...")
+
+def migrate_backup_to_v2(client, folder_path, backup_file):
+    """将旧格式(v1)备份一键升级为v2（用户主动选择）。失败不上传不删除；是否删旧包由用户决定。"""
+    SystemLog.step("正在下载待迁移的备份包", "run"); zip_buffer = io.BytesIO()
+    try:
+        client.download_from(buff=zip_buffer, remote_path=backup_file)
+    except Exception as e:
+        SystemLog.step("远程下载失败", "fail"); SystemLog.warn(f"下载备份文件时出错: {e}"); input("按任意键继续..."); return
+    zip_buffer.seek(0); SystemLog.step("待迁移备份包下载", "done")
+    try:
+        with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
+            if BACKUP_KEY_HEADER_NAME in zip_file.namelist():
+                SystemLog.info("该备份已是v2加密格式，无需迁移。"); input("按任意键继续..."); return
+            filename = os.path.basename(backup_file); timestamp_match = re.search(BACKUP_FILENAME_PATTERN, filename)
+            if not timestamp_match:
+                SystemLog.warn("旧备份文件名格式不正确，无法提取时间戳进行解密。"); input("按任意键继续..."); return
+            old_key = derive_encryption_key(timestamp_match.group(1))
+            SystemLog.step("正在校验旧备份完整性", "run"); valid, reason = verify_backup_integrity(zip_file, old_key)
+            if not valid:
+                SystemLog.step("旧备份完整性校验", "fail"); SystemLog.warn(f"该备份校验失败，无法迁移: {reason}"); input("按任意键继续..."); return
+            SystemLog.step("旧备份完整性校验", "done")
+            decrypted_files = decrypt_all_files(zip_file, old_key, exclude_files=[CHECKSUM_FILE_NAME])
+            if decrypted_files is None:
+                SystemLog.warn("解密旧备份失败，无法迁移。"); input("按任意键继续..."); return
+            manifest_dict = {}
+            for line in decrypted_files[MANIFEST_FILE_NAME].decode(DATA_FILE_ENCODING).splitlines():
+                if "→" in line:
+                    obf, orig = line.split("→", 1); manifest_dict[obf.strip()] = orig.strip()
+        SystemLog.warn("旧格式(v1)备份的密钥可由文件名直接推导，等效明文。")
+        if input(f"\n  {Color.GOLD}是否将其升级为v2加密（使用当前TOTP种子包裹）？(y/n): {Color.RESET}").lower() != 'y':
+            SystemLog.info("已取消迁移。"); input("按任意键继续..."); return
+        local_seed, _, _, _ = load_safe_config(folder_path)
+        if not local_seed:
+            SystemLog.warn("未找到本地TOTP密钥，无法迁移。"); input("按任意键继续..."); return
+        seed = normalize_seed(local_seed); dek = generate_dek(); key_header = build_key_header(dek, seed)
+        new_buffer = io.BytesIO(); new_manifest = {}; new_checksum = {}
+        with zipfile.ZipFile(new_buffer, 'w', zipfile.ZIP_DEFLATED) as nz:
+            nz.writestr(BACKUP_KEY_HEADER_NAME, key_header)
+            for obf, orig in manifest_dict.items():
+                if obf not in decrypted_files: continue
+                enc = encrypt_data(decrypted_files[obf], dek)
+                new_obf = ''.join(random.choices(string.ascii_letters + string.digits, k=OBFUSCATED_NAME_LENGTH)) + ENCRYPTED_FILE_SUFFIX
+                nz.writestr(new_obf, enc); new_manifest[new_obf] = orig; new_checksum[new_obf] = hashlib.sha256(enc).hexdigest()
+            enc_manifest = encrypt_data("\n".join(f"{o} → {g}" for o, g in new_manifest.items()).encode(DATA_FILE_ENCODING), dek)
+            new_checksum[MANIFEST_FILE_NAME] = hashlib.sha256(enc_manifest).hexdigest(); nz.writestr(MANIFEST_FILE_NAME, enc_manifest)
+            nz.writestr(CHECKSUM_FILE_NAME, encrypt_data("\n".join(f"{f}:{h}" for f, h in new_checksum.items()).encode(DATA_FILE_ENCODING), dek))
+        new_buffer.seek(0)
+        with zipfile.ZipFile(new_buffer, 'r') as nz:
+            ok, reason = verify_backup_integrity(nz, dek)
+            if not ok:
+                SystemLog.warn(f"新包自校验失败，已中止迁移: {reason}"); input("按任意键继续..."); return
+            try:
+                unwrap_dek_from_header(nz.read(BACKUP_KEY_HEADER_NAME), seed)
+            except (BackupFormatError, BackupUnlockError) as e:
+                SystemLog.warn(f"新包密钥头部自校验失败，已中止迁移: {e}"); input("按任意键继续..."); return
+        base_name = os.path.basename(backup_file)
+        new_name = base_name[:-len(BACKUP_FILE_SUFFIX)] + MIGRATED_FILE_SUFFIX + BACKUP_FILE_SUFFIX
+        new_remote = f"{os.path.dirname(backup_file) or BACKUP_DIR_NAME}/{new_name}"
+        SystemLog.step("正在上传v2加密备份", "run")
+        try:
+            new_buffer.seek(0); client.upload_to(buff=new_buffer, remote_path=new_remote)
+            SystemLog.step("v2加密备份上传", "done"); SystemLog.info(f"迁移成功：{new_name}")
+        except Exception as e:
+            SystemLog.step("v2加密备份上传", "fail"); SystemLog.warn(f"上传迁移后的备份时出错: {e}"); input("按任意键继续..."); return
+        finally:
+            new_buffer.close()
+        if input(f"\n  {Color.GOLD}是否删除旧格式备份 {base_name}？(y/n): {Color.RESET}").lower() == 'y':
+            try:
+                client.clean(backup_file); SystemLog.info(f"旧格式备份 {base_name} 已删除。")
+            except Exception as e:
+                SystemLog.warn(f"删除旧备份时出错: {e}")
+        else:
+            SystemLog.info("旧格式备份已保留（其加密强度极弱，建议尽快手动删除）。")
+    except Exception as e:
+        SystemLog.warn(f"迁移过程意外中断: {e}")
+    finally:
+        zip_buffer.close()
+    input("按任意键继续...")

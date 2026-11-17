@@ -16,6 +16,10 @@ from .config import DATA_FILE_ENCODING, DATETIME_FORMAT, SAFE_CONFIG_FILE_NAME, 
 from .storage import get_or_create_data_folder, hide_file, unhide_file
 from .ui import Color, SystemLog
 
+def normalize_seed(seed):
+    """规范化 TOTP 种子：去除所有空白字符并转为大写（base32 不区分大小写）。"""
+    return "".join(seed.split()).upper()
+
 def generate_totp_key():
     # 生成一个随机的TOTP密钥，使用base32编码    
     return pyotp.random_base32()
