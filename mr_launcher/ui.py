@@ -1,6 +1,6 @@
 
 
-"""MR 新游戏启动器 v39.0 —— ui 模块。"""
+"""MR 新游戏启动器 v40.0 —— ui 模块。"""
 
 import os
 import re

@@ -1,6 +1,6 @@
 
 
-"""MR 新游戏启动器 v39.0 —— settings_menu 模块。"""
+"""MR 新游戏启动器 v40.0 —— settings_menu 模块。"""
 
 import datetime
 import os
