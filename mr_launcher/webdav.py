@@ -466,6 +466,11 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
         # 第一阶段：取得备份包数据（优先复用已下载数据，否则从远程下载）
         zip_buffer = io.BytesIO()
         if zip_data is not None:
+            # 数据已由调用方传入（管理备份预读），显示来源标识
+            if local_path is not None:
+                SystemLog.info("（已获取）本地备份包")
+            else:
+                SystemLog.info("（已获取）云端备份包")
             zip_buffer.write(zip_data)
             zip_buffer.seek(0)
         else:
