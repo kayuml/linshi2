@@ -30,7 +30,7 @@ def create_or_update_version_file(folder_path):
             unhide_file(version_file)    
                 
         # 强制写入最新版本    
-        with open(version_file, "w") as f:    
+        with open(version_file, "w", encoding="utf-8") as f:    
             f.write(f"Ver：{VERSION}")    
                 
         # 写入完成后重新隐藏文件    
