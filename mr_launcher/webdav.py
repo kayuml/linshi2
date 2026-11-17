@@ -165,17 +165,21 @@ def test_webdav_connection(url, username, password, max_attempts=WEBDAV_MAX_ATTE
         
     return False
 
-def _get_webdav_client(folder_path):
+def _get_webdav_client(folder_path, quiet=False):
     """读取 WebDAV 配置并初始化客户端；未配置或读取失败时返回 None。"""
     webdav_config_path = os.path.join(folder_path, WEBDAV_CONFIG_FILE_NAME)
     if not os.path.exists(webdav_config_path):
-        SystemLog.warn("未配置 WebDAV 服务器，请先配置 WebDAV 服务器。"); input("按任意键继续..."); return None
+        if not quiet:
+            SystemLog.warn("未配置 WebDAV 服务器，请先配置 WebDAV 服务器。"); input("按任意键继续...")
+        return None
     try:
         with open(webdav_config_path, "r", encoding=DATA_FILE_ENCODING) as file:
             lines = file.readlines()
             webdav_url = lines[0].strip().replace("WebDAV URL: ", ""); username = lines[1].strip().replace("Username: ", ""); password = lines[2].strip().replace("Password: ", "")
     except Exception as e:
-        SystemLog.warn(f"读取 WebDAV 配置时出错: {e}"); input("按任意键继续..."); return None
+        if not quiet:
+            SystemLog.warn(f"读取 WebDAV 配置时出错: {e}"); input("按任意键继续...")
+        return None
     return Client({'webdav_hostname': webdav_url, 'webdav_login': username, 'webdav_password': password, 'webdav_encoding': WEBDAV_ENCODING})
 
 def _acquire_backup_key(zip_file, filename, folder_path):
@@ -288,7 +292,7 @@ def perform_local_backup(folder_path=None):
     """
     执行本地备份：构建与云端备份完全相同的 v2 加密包，直接保存到数据目录（MRNewGameLauncherData）内。
     无需配置 WebDAV，可离线使用；压缩包不设置隐藏属性，便于自行复制到其他位置保管。
-    如需恢复，可将该包上传到 WebDAV 备份目录后通过"管理备份"恢复。
+    可在"管理备份"中直接选择本地备份进行恢复/删除。
     """
     if folder_path is None:
         folder_path = get_or_create_data_folder()
@@ -449,7 +453,7 @@ def check_version_compatibility(backup_version):
         return False, f"主版本不兼容（当前：{VERSION}，备份：{backup_version}）"    
     return True, ""
 
-def restore_backup(client, folder_path, backup_file, restore_gamelist=False, restore_safe_config=False, zip_data=None):  
+def restore_backup(client, folder_path, backup_file, restore_gamelist=False, restore_safe_config=False, zip_data=None, local_path=None):  
     """        
     从备份文件中恢复游戏列表和/或安全配置。      
     验证失败时不还原任何文件。        
@@ -500,8 +504,11 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                 choice = input(f"\n  {Color.GOLD}是否删除该备份文件？(y/n): {Color.RESET}").lower()    
                 if choice == 'y':        
                     try:        
-                        client.clean(backup_file)        
-                        SystemLog.info("该备份文件已成功删除。")    
+                        if local_path is not None:
+                            os.remove(local_path)
+                        else:
+                            client.clean(backup_file)
+                        SystemLog.info("该备份文件已成功删除。")
                     except Exception as e:        
                         SystemLog.warn(f"删除该备份文件时出错: {e}")    
                     input("按任意键继续...")        
@@ -691,6 +698,11 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                     hide_file(safe_config_path)  # 写入完成后重新隐藏文件        
                 SystemLog.step("安全配置与 TOTP 密钥还原", "done")    
                             
+            # v1 备份恢复成功后，询问是否原地升级为 v2（覆盖原包）
+            if fmt_version == 1:
+                up = input(f"\n  {Color.GOLD}是否将当前加密格式为v1版本的压缩包升级至 v2（现有的会被自动覆盖替换）？(y/n): {Color.RESET}").lower()
+                if up == 'y':
+                    _upgrade_backup_in_place(client, folder_path, backup_file, decrypted_files, manifest_dict, local_path)
             SystemLog.success("所有数据已成功恢复，程序即将退出。")    
             input("  按任意键关闭程序...")    
             os._exit(0)  # 退出程序        
@@ -702,76 +714,71 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
     finally:        
         zip_buffer.close()
 
-def manage_backups(folder_path=None):  
-    """        
-    管理 WebDAV 服务器上的备份文件，包括列出备份、恢复备份和删除备份。        
-    """        
-    if folder_path is None:        
-        folder_path = get_or_create_data_folder()        
-            
-    # 加载 WebDAV 配置        
-    client = _get_webdav_client(folder_path)
-    if client is None:
-        return
-            
-    # 获取备份文件列表        
-    backup_dir = BACKUP_DIR_NAME        
-    
-    # 增加异常捕获，防止连接失败导致崩溃
+def manage_backups(folder_path=None):
+    """
+    管理备份文件（云端 + 本地），包括列出、恢复、删除。
+    本地备份来自数据目录内的 backup_*.zip；云端备份来自 WebDAV（未配置时仅显示本地）。
+    v1 包在恢复成功后会询问是否原地升级为 v2。
+    """
+    if folder_path is None:
+        folder_path = get_or_create_data_folder()
+    client = _get_webdav_client(folder_path, quiet=True)
+    entries = []
     try:
-        SystemLog.step("正在检查 WebDAV 远程状态", "run")
-        if not client.check(backup_dir):        
-            SystemLog.step("检查远程状态", "done")
-            SystemLog.info("备份目录不存在，请先创建备份。")
-            input("按任意键继续...")
-            return        
-            
-        backup_files = client.list(backup_dir)        
-        SystemLog.step("远程列表获取", "done")
+        for f in os.listdir(folder_path):
+            if f.startswith(BACKUP_FILE_PREFIX) and f.endswith(BACKUP_FILE_SUFFIX):
+                entries.append({"source": "local", "name": f, "path": os.path.join(folder_path, f)})
     except Exception as e:
-        SystemLog.step("远程访问失败", "fail")
-        SystemLog.warn(f"无法连接到 WebDAV 服务器，请检查网络或地址有效性：{e}")
+        SystemLog.warn(f"读取本地备份列表时出错: {e}")
+    if client is not None:
+        try:
+            SystemLog.step("正在检查 WebDAV 远程状态", "run")
+            if client.check(BACKUP_DIR_NAME):
+                remote_files = [f for f in client.list(BACKUP_DIR_NAME) if f.endswith(BACKUP_FILE_SUFFIX)]
+                for f in remote_files:
+                    entries.append({"source": "remote", "name": f, "path": f"{BACKUP_DIR_NAME}/{f}"})
+                SystemLog.step("远程列表获取", "done")
+            else:
+                SystemLog.step("检查远程状态", "done")
+                SystemLog.info("云端备份目录不存在（尚未创建云端备份）。")
+        except Exception as e:
+            SystemLog.step("远程访问失败", "fail")
+            SystemLog.warn(f"无法连接 WebDAV，仅显示本地备份: {e}")
+    else:
+        SystemLog.info("未配置 WebDAV，仅显示本地备份。")
+    entries.sort(key=lambda e: e["name"], reverse=True)
+    if not entries:
+        SystemLog.info("没有可用的备份文件。")
         input("按任意键继续...")
         return
-            
-    backup_files = [f for f in backup_files if f.endswith(BACKUP_FILE_SUFFIX)]  # 只保留 .zip 文件        
-    backup_files.sort(reverse=True)  # 按时间倒序排序        
-            
-    if not backup_files:        
-        SystemLog.info("没有可用的备份文件。")    
-        input("按任意键继续...")        
-        return        
-            
-    # 显示备份文件列表        
-    print("备份文件列表：")        
-    for i, backup_file in enumerate(backup_files, start=1):        
-        print(f"{i}. {backup_file}")        
-            
-    # 提示用户选择备份文件        
-    choice = input("请输入要操作的备份文件序号（直接回车返回）：")        
-    if not choice:        
-        return        
-            
-    if not choice.isdigit() or int(choice) < 1 or int(choice) > len(backup_files):        
-        SystemLog.warn("无效的选择，请重新输入。")    
-        input("按任意键继续...")        
-        return        
-            
-    selected_backup = backup_files[int(choice) - 1]
-    remote_path = f"{backup_dir}/{selected_backup}"
-
-    # 选中后先下载一次用于格式识别（备份包很小），后续恢复/迁移复用该数据，避免二次下载
+    print("备份文件列表：")
+    for i, e in enumerate(entries, start=1):
+        tag = f"{Color.CYAN}[本地]{Color.RESET}" if e["source"] == "local" else f"{Color.BLUE}[云端]{Color.RESET}"
+        print(f"{i}. {tag} {e['name']}")
+    choice = input("请输入要操作的备份文件序号（直接回车返回）：")
+    if not choice:
+        return
+    if not choice.isdigit() or int(choice) < 1 or int(choice) > len(entries):
+        SystemLog.warn("无效的选择，请重新输入。")
+        input("按任意键继续...")
+        return
+    sel = entries[int(choice) - 1]
+    is_local = sel["source"] == "local"
     SystemLog.step("正在读取备份包以识别格式", "run")
-    detect_buffer = io.BytesIO()
     try:
-        client.download_from(buff=detect_buffer, remote_path=remote_path)
+        if is_local:
+            with open(sel["path"], "rb") as f:
+                zip_data = f.read()
+        else:
+            detect_buffer = io.BytesIO()
+            client.download_from(buff=detect_buffer, remote_path=sel["path"])
+            zip_data = detect_buffer.getvalue()
+            detect_buffer.close()
     except Exception as e:
         SystemLog.step("备份包读取", "fail")
-        SystemLog.warn(f"下载备份文件时出错: {e}")
+        SystemLog.warn(f"读取备份文件时出错: {e}")
         input("按任意键继续...")
         return
-    zip_data = detect_buffer.getvalue()
-    detect_buffer.close()
     try:
         with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
             is_v2 = BACKUP_KEY_HEADER_NAME in zf.namelist()
@@ -781,132 +788,75 @@ def manage_backups(folder_path=None):
         SystemLog.warn(f"无法读取备份包（可能已损坏）: {e}")
         input("按任意键继续...")
         return
-
-    # 提供操作选项（按格式标注；v2 包的升级选项置灰保留，不隐藏）
     format_tag = f"{Color.GREEN}[v2]{Color.RESET}" if is_v2 else f"{Color.RED}[旧格式·等效明文]{Color.RESET}"
-    print(f"\n已选择: {selected_backup} {format_tag}")
+    print(f"\n已选择: [{'本地' if is_local else '云端'}] {sel['name']} {format_tag}")
     print("1. 恢复游戏列表")
     print("2. 恢复安全配置")
     print("3. 全部恢复")
     print("4. 删除备份")
-    if is_v2:
-        print(f"{Color.GRAY}5. 升级加密格式（已是v2，无需迁移）{Color.RESET}")
-    else:
-        print("5. 升级加密格式（旧包→v2）")
     operation = input("请选择操作（直接回车返回）：")
-
     if not operation:
-        return  # 返回到上一级菜单
-
+        return
+    local_path = sel["path"] if is_local else None
     if operation == "1":
-        restore_backup(client, folder_path, remote_path, restore_gamelist=True, restore_safe_config=False, zip_data=zip_data)
+        restore_backup(client, folder_path, sel["path"], restore_gamelist=True, restore_safe_config=False, zip_data=zip_data, local_path=local_path)
     elif operation == "2":
-        restore_backup(client, folder_path, remote_path, restore_gamelist=False, restore_safe_config=True, zip_data=zip_data)
+        restore_backup(client, folder_path, sel["path"], restore_gamelist=False, restore_safe_config=True, zip_data=zip_data, local_path=local_path)
     elif operation == "3":
-        restore_backup(client, folder_path, remote_path, restore_gamelist=True, restore_safe_config=True, zip_data=zip_data)
+        restore_backup(client, folder_path, sel["path"], restore_gamelist=True, restore_safe_config=True, zip_data=zip_data, local_path=local_path)
     elif operation == "4":
         try:
-            SystemLog.step(f"正在删除备份文件: {selected_backup}", "run")
-            # 使用 clean 方法删除文件
-            client.clean(remote_path)
+            SystemLog.step(f"正在删除备份文件: {sel['name']}", "run")
+            if is_local:
+                os.remove(sel["path"])
+            else:
+                client.clean(sel["path"])
             SystemLog.step("备份文件删除", "done")
-            SystemLog.info(f"备份文件 {selected_backup} 已删除。")
+            SystemLog.info(f"备份文件 {sel['name']} 已删除。")
         except Exception as e:
             SystemLog.step("备份文件删除", "fail")
             SystemLog.warn(f"删除备份文件时出错: {e}")
         input("按任意键继续...")
-    elif operation == "5":
-        if is_v2:
-            SystemLog.info("该备份已是v2加密格式，无需迁移。")
-            input("按任意键继续...")
-        else:
-            migrate_backup_to_v2(client, folder_path, remote_path, zip_data=zip_data)
     else:
         SystemLog.warn("无效的选择，请重新输入。")
         input("按任意键继续...")
 
 
-def migrate_backup_to_v2(client, folder_path, backup_file, zip_data=None):
-    """将旧格式(v1)备份一键升级为v2（用户主动选择）。失败不上传不删除；是否删旧包由用户决定。"""
-    zip_buffer = io.BytesIO()
-    if zip_data is not None:
-        zip_buffer.write(zip_data)
-        zip_buffer.seek(0)
-    else:
-        SystemLog.step("正在下载待迁移的备份包", "run")
+def _upgrade_backup_in_place(client, folder_path, backup_file, decrypted_files, manifest_dict, local_path=None):
+    """将已解密的 v1 备份内容以 v2 重新加密并原地覆盖（本地写回原文件 / 云端覆盖原远程路径）。
+    先自校验再覆盖，失败时原包保持不变。"""
+    local_seed, _, _, _ = load_safe_config(folder_path)
+    if not local_seed:
+        SystemLog.warn("未找到本地TOTP密钥，无法升级。"); return
+    seed = normalize_seed(local_seed); dek = generate_dek(); key_header = build_key_header(dek, seed)
+    new_buffer = io.BytesIO(); new_manifest = {}; new_checksum = {}
+    with zipfile.ZipFile(new_buffer, 'w', zipfile.ZIP_DEFLATED) as nz:
+        nz.writestr(BACKUP_KEY_HEADER_NAME, key_header)
+        for obf, orig in manifest_dict.items():
+            if obf not in decrypted_files: continue
+            enc = encrypt_data(decrypted_files[obf], dek)
+            new_obf = ''.join(random.choices(string.ascii_letters + string.digits, k=OBFUSCATED_NAME_LENGTH)) + ENCRYPTED_FILE_SUFFIX
+            nz.writestr(new_obf, enc); new_manifest[new_obf] = orig; new_checksum[new_obf] = hashlib.sha256(enc).hexdigest()
+        enc_manifest = encrypt_data("\n".join(f"{o} → {g}" for o, g in new_manifest.items()).encode(DATA_FILE_ENCODING), dek)
+        new_checksum[MANIFEST_FILE_NAME] = hashlib.sha256(enc_manifest).hexdigest(); nz.writestr(MANIFEST_FILE_NAME, enc_manifest)
+        nz.writestr(CHECKSUM_FILE_NAME, encrypt_data("\n".join(f"{f}:{h}" for f, h in new_checksum.items()).encode(DATA_FILE_ENCODING), dek))
+    new_buffer.seek(0)
+    with zipfile.ZipFile(new_buffer, 'r') as nz:
+        ok, reason = verify_backup_integrity(nz, dek)
+        if not ok:
+            SystemLog.warn(f"升级自校验失败，已中止（原包未改动）: {reason}"); return
         try:
-            client.download_from(buff=zip_buffer, remote_path=backup_file)
-        except Exception as e:
-            SystemLog.step("远程下载失败", "fail"); SystemLog.warn(f"下载备份文件时出错: {e}"); input("按任意键继续..."); return
-        zip_buffer.seek(0); SystemLog.step("待迁移备份包下载", "done")
-
-    zip_buffer.seek(0); SystemLog.step("待迁移备份包下载", "done")
+            unwrap_dek_from_header(nz.read(BACKUP_KEY_HEADER_NAME), seed)
+        except (BackupFormatError, BackupUnlockError) as e:
+            SystemLog.warn(f"升级自校验失败，已中止（原包未改动）: {e}"); return
+    data = new_buffer.getvalue(); new_buffer.close()
     try:
-        with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
-            if BACKUP_KEY_HEADER_NAME in zip_file.namelist():
-                SystemLog.info("该备份已是v2加密格式，无需迁移。"); input("按任意键继续..."); return
-            filename = os.path.basename(backup_file); timestamp_match = re.search(BACKUP_FILENAME_PATTERN, filename)
-            if not timestamp_match:
-                SystemLog.warn("旧备份文件名格式不正确，无法提取时间戳进行解密。"); input("按任意键继续..."); return
-            old_key = derive_encryption_key(timestamp_match.group(1))
-            SystemLog.step("正在校验旧备份完整性", "run"); valid, reason = verify_backup_integrity(zip_file, old_key)
-            if not valid:
-                SystemLog.step("旧备份完整性校验", "fail"); SystemLog.warn(f"该备份校验失败，无法迁移: {reason}"); input("按任意键继续..."); return
-            SystemLog.step("旧备份完整性校验", "done")
-            decrypted_files = decrypt_all_files(zip_file, old_key, exclude_files=[CHECKSUM_FILE_NAME])
-            if decrypted_files is None:
-                SystemLog.warn("解密旧备份失败，无法迁移。"); input("按任意键继续..."); return
-            manifest_dict = {}
-            for line in decrypted_files[MANIFEST_FILE_NAME].decode(DATA_FILE_ENCODING).splitlines():
-                if "→" in line:
-                    obf, orig = line.split("→", 1); manifest_dict[obf.strip()] = orig.strip()
-        SystemLog.warn("旧格式(v1)备份的密钥可由文件名直接推导，等效明文。")
-        if input(f"\n  {Color.GOLD}是否将其升级为v2加密（使用当前TOTP种子包裹）？(y/n): {Color.RESET}").lower() != 'y':
-            SystemLog.info("已取消迁移。"); input("按任意键继续..."); return
-        local_seed, _, _, _ = load_safe_config(folder_path)
-        if not local_seed:
-            SystemLog.warn("未找到本地TOTP密钥，无法迁移。"); input("按任意键继续..."); return
-        seed = normalize_seed(local_seed); dek = generate_dek(); key_header = build_key_header(dek, seed)
-        new_buffer = io.BytesIO(); new_manifest = {}; new_checksum = {}
-        with zipfile.ZipFile(new_buffer, 'w', zipfile.ZIP_DEFLATED) as nz:
-            nz.writestr(BACKUP_KEY_HEADER_NAME, key_header)
-            for obf, orig in manifest_dict.items():
-                if obf not in decrypted_files: continue
-                enc = encrypt_data(decrypted_files[obf], dek)
-                new_obf = ''.join(random.choices(string.ascii_letters + string.digits, k=OBFUSCATED_NAME_LENGTH)) + ENCRYPTED_FILE_SUFFIX
-                nz.writestr(new_obf, enc); new_manifest[new_obf] = orig; new_checksum[new_obf] = hashlib.sha256(enc).hexdigest()
-            enc_manifest = encrypt_data("\n".join(f"{o} → {g}" for o, g in new_manifest.items()).encode(DATA_FILE_ENCODING), dek)
-            new_checksum[MANIFEST_FILE_NAME] = hashlib.sha256(enc_manifest).hexdigest(); nz.writestr(MANIFEST_FILE_NAME, enc_manifest)
-            nz.writestr(CHECKSUM_FILE_NAME, encrypt_data("\n".join(f"{f}:{h}" for f, h in new_checksum.items()).encode(DATA_FILE_ENCODING), dek))
-        new_buffer.seek(0)
-        with zipfile.ZipFile(new_buffer, 'r') as nz:
-            ok, reason = verify_backup_integrity(nz, dek)
-            if not ok:
-                SystemLog.warn(f"新包自校验失败，已中止迁移: {reason}"); input("按任意键继续..."); return
-            try:
-                unwrap_dek_from_header(nz.read(BACKUP_KEY_HEADER_NAME), seed)
-            except (BackupFormatError, BackupUnlockError) as e:
-                SystemLog.warn(f"新包密钥头部自校验失败，已中止迁移: {e}"); input("按任意键继续..."); return
-        base_name = os.path.basename(backup_file)
-        new_name = base_name[:-len(BACKUP_FILE_SUFFIX)] + MIGRATED_FILE_SUFFIX + BACKUP_FILE_SUFFIX
-        new_remote = f"{os.path.dirname(backup_file) or BACKUP_DIR_NAME}/{new_name}"
-        SystemLog.step("正在上传v2加密备份", "run")
-        try:
-            new_buffer.seek(0); client.upload_to(buff=new_buffer, remote_path=new_remote)
-            SystemLog.step("v2加密备份上传", "done"); SystemLog.info(f"迁移成功：{new_name}")
-        except Exception as e:
-            SystemLog.step("v2加密备份上传", "fail"); SystemLog.warn(f"上传迁移后的备份时出错: {e}"); input("按任意键继续..."); return
-        finally:
-            new_buffer.close()
-        if input(f"\n  {Color.GOLD}是否删除旧格式备份 {base_name}？(y/n): {Color.RESET}").lower() == 'y':
-            try:
-                client.clean(backup_file); SystemLog.info(f"旧格式备份 {base_name} 已删除。")
-            except Exception as e:
-                SystemLog.warn(f"删除旧备份时出错: {e}")
+        if local_path is not None:
+            with open(local_path, "wb") as f:
+                f.write(data)
+            SystemLog.info(f"已原地升级为v2：{local_path}")
         else:
-            SystemLog.info("旧格式备份已保留（其加密强度极弱，建议尽快手动删除）。")
+            client.upload_to(buff=io.BytesIO(data), remote_path=backup_file)
+            SystemLog.info(f"已原地升级为v2：{backup_file}")
     except Exception as e:
-        SystemLog.warn(f"迁移过程意外中断: {e}")
-    finally:
-        zip_buffer.close()
-    input("按任意键继续...")
+        SystemLog.warn(f"覆盖写入升级包时出错: {e}")
