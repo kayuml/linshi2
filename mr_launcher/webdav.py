@@ -211,7 +211,7 @@ def _acquire_backup_key(zip_file, filename, folder_path):
     if not timestamp_match:
         SystemLog.warn("备份文件名格式不正确，无法提取时间戳进行解密。"); return None, 0
     SystemLog.warn("此为旧格式(v1)备份：密钥由文件名时间戳派生，加密强度极弱、等效明文。")
-    SystemLog.info("建议在“管理备份”中使用“升级加密格式”将其迁移为v2，或删除后重新备份。")
+    SystemLog.info("恢复成功后将询问是否原地升级为v2（自动覆盖原包），或删除后重新备份。")
     return derive_encryption_key(timestamp_match.group(1)), 1
 
 def _build_backup_zip(folder_path):
@@ -470,19 +470,31 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
             zip_buffer.write(zip_data)
             zip_buffer.seek(0)
         else:
-            SystemLog.step("正在从远程 WebDAV 下载备份包", "run")
-            # 增加对远程下载的网络异常处理
-            try:
-                client.download_from(buff=zip_buffer, remote_path=backup_file)
-            except Exception as e:
-                SystemLog.step("远程下载失败", "fail")
-                SystemLog.warn(f"从 WebDAV 下载备份文件时发生错误: {e}")
-                input("按任意键继续...")
-                return
-            zip_buffer.seek(0)
-            SystemLog.step("远程备份包下载", "done")
+            if local_path is not None:
+                SystemLog.step("正在读取本地备份包", "run")
+                try:
+                    with open(local_path, "rb") as f:
+                        zip_buffer.write(f.read())
+                except Exception as e:
+                    SystemLog.step("本地备份读取", "fail")
+                    SystemLog.warn(f"读取本地备份文件时出错: {e}")
+                    input("按任意键继续...")
+                    return
+                zip_buffer.seek(0)
+                SystemLog.step("本地备份包读取", "done")
+            else:
+                SystemLog.step("正在从云端下载备份包", "run")
+                try:
+                    client.download_from(buff=zip_buffer, remote_path=backup_file)
+                except Exception as e:
+                    SystemLog.step("云端下载失败", "fail")
+                    SystemLog.warn(f"从 WebDAV 下载备份文件时发生错误: {e}")
+                    input("按任意键继续...")
+                    return
+                zip_buffer.seek(0)
+                SystemLog.step("云端备份包下载", "done")
 
-        SystemLog.step("远程备份包下载", "done")    
+        SystemLog.step("备份包获取", "done")    
                 
         with zipfile.ZipFile(zip_buffer, 'r') as zip_file:        
             # 1. 判定格式并取得解密密钥（v2 种子包裹 / v1 时间戳兼容）
@@ -788,7 +800,7 @@ def manage_backups(folder_path=None):
         SystemLog.warn(f"无法读取备份包（可能已损坏）: {e}")
         input("按任意键继续...")
         return
-    format_tag = f"{Color.GREEN}[v2]{Color.RESET}" if is_v2 else f"{Color.RED}[旧格式·等效明文]{Color.RESET}"
+    format_tag = f"{Color.GREEN}[v2]{Color.RESET}" if is_v2 else f"{Color.RED}[v1]{Color.RESET}"
     print(f"\n已选择: [{'本地' if is_local else '云端'}] {sel['name']} {format_tag}")
     print("1. 恢复游戏列表")
     print("2. 恢复安全配置")
