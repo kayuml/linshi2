@@ -238,7 +238,9 @@ def _build_backup_zip(folder_path):
             for original_filename in SENSITIVE_FILES:
                 file_path = os.path.join(folder_path, original_filename)
                 if os.path.exists(file_path):
-                    with open(file_path, "r", encoding=DATA_FILE_ENCODING) as f:
+                    # 版本文件使用 VERSION_FILE_ENCODING (utf-8)，其他文件使用 DATA_FILE_ENCODING (gb18030)
+                    file_encoding = VERSION_FILE_ENCODING if original_filename == VERSION_FILE_NAME else DATA_FILE_ENCODING
+                    with open(file_path, "r", encoding=file_encoding) as f:
                         content = f.read()
                     random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=OBFUSCATED_NAME_LENGTH))
                     obfuscated_filename = random_str + ENCRYPTED_FILE_SUFFIX
