@@ -39,6 +39,7 @@ from .config import (
     BACKUP_KEY_HEADER_NAME,
     BACKUP_SEED_MAX_ATTEMPTS,
     MIGRATED_FILE_SUFFIX,
+    VERSION_FILE_ENCODING,
 )
 from .crypto import (BackupFormatError, BackupUnlockError, build_key_header, decrypt_data,
     derive_encryption_key, encrypt_data, generate_dek, unwrap_dek_from_header)
