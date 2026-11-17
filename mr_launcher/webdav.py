@@ -211,7 +211,6 @@ def _acquire_backup_key(zip_file, filename, folder_path):
     if not timestamp_match:
         SystemLog.warn("备份文件名格式不正确，无法提取时间戳进行解密。"); return None, 0
     SystemLog.warn("此为旧格式(v1)备份：密钥由文件名时间戳派生，加密强度极弱、等效明文。")
-    SystemLog.info("恢复成功后将询问是否原地升级为v2（自动覆盖原包），或删除后重新备份。")
     return derive_encryption_key(timestamp_match.group(1)), 1
 
 def _build_backup_zip(folder_path):
@@ -494,7 +493,6 @@ def restore_backup(client, folder_path, backup_file, restore_gamelist=False, res
                 zip_buffer.seek(0)
                 SystemLog.step("云端备份包下载", "done")
 
-        SystemLog.step("备份包获取", "done")    
                 
         with zipfile.ZipFile(zip_buffer, 'r') as zip_file:        
             # 1. 判定格式并取得解密密钥（v2 种子包裹 / v1 时间戳兼容）
