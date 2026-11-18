@@ -16,11 +16,12 @@ jobs:
       - name: Create ZIP archive
         run: |
           # 排除 .git、.github、.gitignore、README.md、requirements.txt
-          zip -r "新游戏启动器40.0.zip" . -x ".git*" -x ".github/*" -x ".gitignore" -x "README.md" -x "requirements.txt"
+          # 使用英文命名以符合 GitHub Release Asset 规范
+          zip -r "MRNewGameLauncher40.0.zip" . -x ".git*" -x ".github/*" -x ".gitignore" -x "README.md" -x "requirements.txt"
           
       - name: Upload asset to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: "新游戏启动器40.0.zip"
+          files: "MRNewGameLauncher40.0.zip"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
