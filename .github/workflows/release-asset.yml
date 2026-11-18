@@ -1,0 +1,26 @@
+name: Build and Upload Release Asset
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-asset:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Create ZIP archive
+        run: |
+          # 排除 .git、.github、.gitignore、README.md、requirements.txt
+          zip -r "新游戏启动器40.0.zip" . -x ".git*" -x ".github/*" -x ".gitignore" -x "README.md" -x "requirements.txt"
+          
+      - name: Upload asset to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "新游戏启动器40.0.zip"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
