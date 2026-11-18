@@ -245,7 +245,7 @@ def _build_backup_zip(folder_path):
                     random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=OBFUSCATED_NAME_LENGTH))
                     obfuscated_filename = random_str + ENCRYPTED_FILE_SUFFIX
                     manifest[obfuscated_filename] = original_filename
-                    encrypted_data = encrypt_data(content.encode(DATA_FILE_ENCODING), encryption_key)
+                    encrypted_data = encrypt_data(content.encode(file_encoding), encryption_key)
                     checksum_dict[obfuscated_filename] = hashlib.sha256(encrypted_data).hexdigest()
                     zip_file.writestr(obfuscated_filename, encrypted_data)
             manifest_bytes = "\n".join(f"{obf} → {orig}" for obf, orig in manifest.items()).encode(DATA_FILE_ENCODING)
